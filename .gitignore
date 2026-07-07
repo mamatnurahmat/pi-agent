@@ -7,7 +7,7 @@ locks.json
 telegram.json
 settings.json
 agent/bin/
-agent/skills/
+agent/skills/start-project/
 agent/prompts/cek-commit.md
 agent/prompts/git.md
 *.log

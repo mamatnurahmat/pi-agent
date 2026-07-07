@@ -8,6 +8,9 @@
 - Setup Git repo di `~/.pi`
 - Sanitasi file (hanya pi-agent related)
 - 5 agent definitions: scout, planner, worker, reviewer, debugger
+- **daily-devops** agent + DeepSeek variant
+- 5 **DevOps skills**: k8s-health, temporal-admin, log-inspector, db-backup, deploy-verify
+- DeepSeek alternative config (models.json.example + 5 agent variants)
 - Push ke `github.com/mamatnurahmat/pi-agent`
 
 ## Hari 2 — Agent Pool Manager

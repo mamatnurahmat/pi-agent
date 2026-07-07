@@ -17,11 +17,25 @@ Specialist agent definitions with optimized model/tool configs:
 | `worker` | Sonnet | read,bash,edit,write,... | General implementation |
 | `reviewer` | Sonnet | read,grep,find,ls,bash | Code review |
 | `debugger` | Sonnet | read,bash,grep,find,ls | Debugging |
+| `daily-devops` | Sonnet | read,bash,grep,ls | **Daily DevOps routine** |
+| `*-deepseek` | V3/R1 | per agent | DeepSeek variants (5-11x cheaper) |
+
+### Skills: `skills/*/SKILL.md`
+Reusable step-by-step workflows for DevOps tasks:
+
+| Skill | Purpose |
+|-------|---------|
+| `k8s-health` | Cluster health check (nodes, pods, events) |
+| `temporal-admin` | Temporal server admin & namespace management |
+| `log-inspector` | Log analysis & error tracing |
+| `db-backup` | Database backup status & health |
+| `deploy-verify` | Deployment verification & rollback |
 
 ### Workflows: `prompts/*.md` (via pi)
 - `/implement <task>` — scout → planner → worker
 - `/implement-and-review <task>` — worker → reviewer → worker
 - `/debug <task>` — debugger → worker
+- `/devops <action>` — daily-devops → full routine
 
 ## 🚀 Quick Start
 
