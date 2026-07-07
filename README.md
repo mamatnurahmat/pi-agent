@@ -12,13 +12,20 @@ Specialist agent definitions with optimized model/tool configs:
 
 | Agent | Model | Tools | Purpose |
 |-------|-------|-------|---------|
-| `scout` | Haiku | read,grep,find,ls,bash | Fast codebase recon |
-| `planner` | Sonnet | read,grep,find,ls | Implementation plans |
-| `worker` | Sonnet | read,bash,edit,write,... | General implementation |
-| `reviewer` | Sonnet | read,grep,find,ls,bash | Code review |
-| `debugger` | Sonnet | read,bash,grep,find,ls | Debugging |
-| `daily-devops` | Sonnet | read,bash,grep,ls | **Daily DevOps routine** |
-| `*-deepseek` | V3/R1 | per agent | DeepSeek variants (5-11x cheaper) |
+| `scout` | DeepSeek V3 | read,grep,find,ls,bash | Fast codebase recon |
+| `planner` | DeepSeek R1 | read,grep,find,ls | Implementation plans |
+| `worker` | DeepSeek V3 | read,bash,edit,write,... | General implementation |
+| `reviewer` | DeepSeek R1 | read,grep,find,ls,bash | Code review |
+| `debugger` | DeepSeek R1 | read,bash,grep,find,ls | Debugging |
+| `daily-devops` | DeepSeek V3 | read,bash,grep,ls | **Daily DevOps routine** |
+
+> **Provider:** OpenRouter | **Etika:** Islami (salam, santun, doa)
+
+### System Prompt: `APPEND_SYSTEM.md`
+Etika komunikasi Islami otomatis ditambahkan ke setiap percakapan:
+- Salam pembuka **Assalamu'alaikum**
+- Bahasa santun & islami (Alhamdulillah, InsyaAllah, MasyaAllah, Barakallah)
+- Doa penutup
 
 ### Skills: `skills/*/SKILL.md`
 Reusable step-by-step workflows for DevOps tasks:

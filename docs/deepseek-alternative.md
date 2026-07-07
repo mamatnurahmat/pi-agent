@@ -1,22 +1,103 @@
-# 🔀 DeepSeek Model Configuration
+# 🔀 OpenRouter + DeepSeek Model Configuration
 
-> Alternatif model menggunakan DeepSeek untuk pi multi-agent system
-> **Setup:** `cp models.json.example ~/.pi/agent/models.json` lalu isi `$DEEPSEEK_API_KEY`
+> **Default setup:** OpenRouter sebagai provider dengan model DeepSeek V3 (hemat) dan R1 (reasoning)
+> **API Key:** `export OPENROUTER_API_KEY=sk-or-...`
+> **Setup:** `cp models.json.example ~/.pi/agent/models.json`
 
 ---
 
-## 📊 Perbandingan Model
+## 🏗️ Arsitektur
 
-| Agent | Claude (Default) | DeepSeek Alternatif | Cost Saving |
-|-------|-----------------|-------------------|-------------|
-| **Scout** | Haiku ($0.25/M) | **DeepSeek V3** ($0.27/M) | ~sama |
-| **Planner** | Sonnet ($3.00/M) | **DeepSeek R1** ($0.55/M) | **~5.5x lebih murah** |
-| **Worker** | Sonnet ($3.00/M) | **DeepSeek V3** ($0.27/M) | **~11x lebih murah** |
-| **Reviewer** | Sonnet ($3.00/M) | **DeepSeek R1** ($0.55/M) | **~5.5x lebih murah** |
-| **Debugger** | Sonnet ($3.00/M) | **DeepSeek R1** ($0.55/M) | **~5.5x lebih murah** |
+```
+User ──► Pi Agent ──► OpenRouter ──► DeepSeek API
+                          │
+                          ├─ deepseek/deepseek-chat (V3) — $0.30/M input
+                          └─ deepseek/deepseek-r1 (R1)  — $0.55/M input
+```
 
-> *Harga per 1M token input. Output DeepSeek R1 ~$2.19/M, tetap jauh lebih murah dari Sonnet.*
-> *DeepSeek V3 mendukung **1M context window**, unggul untuk codebase besar.*
+---
+
+## 📊 Perbandingan Biaya (via OpenRouter)
+
+| Model | OpenRouter ID | Input/M | Output/M | vs Claude Sonnet |
+|-------|--------------|---------|----------|-----------------|
+| **DeepSeek V3** ⭐ | `deepseek/deepseek-chat` | **$0.30** | **$1.15** | **~10x lebih murah** |
+| DeepSeek R1 | `deepseek/deepseek-r1` | $0.55 | $2.19 | **~5x lebih murah** |
+| Claude Sonnet 4 (via OR) | `anthropic/claude-sonnet-4` | $3.00 | $15.00 | — |
+
+---
+
+## 🧠 Model via OpenRouter
+
+### 1. `deepseek/deepseek-chat` (V3 — Default)
+| Properti | Nilai |
+|----------|-------|
+| Context | 1,000,000 token |
+| Max Output | 8,192 token |
+| Input Cost | $0.30 / 1M token |
+| Output Cost | $1.15 / 1M token |
+| Reasoning | ❌ |
+| Cocok untuk | **Scout, Worker, Daily-DevOps** |
+
+### 2. `deepseek/deepseek-r1` (R1 — Reasoning)
+| Properti | Nilai |
+|----------|-------|
+| Context | 1,000,000 token |
+| Max Output | 8,192 token |
+| Input Cost | $0.55 / 1M token |
+| Output Cost | $2.19 / 1M token |
+| Reasoning | ✅ (bawaan) |
+| Cocok untuk | **Planner, Reviewer, Debugger** |
+
+---
+
+## ⚙️ Konfigurasi per Agent (Default)
+
+```
+Agent                OpenRouter Model ID
+─────                ───────────────────
+scout             →  deepseek/deepseek-chat   ($0.30/M)
+planner           →  deepseek/deepseek-r1     ($0.55/M)
+worker            →  deepseek/deepseek-chat   ($0.30/M)
+reviewer          →  deepseek/deepseek-r1     ($0.55/M)
+debugger          →  deepseek/deepseek-r1     ($0.55/M)
+daily-devops      →  deepseek/deepseek-chat   ($0.30/M)
+```
+
+---
+
+## 💰 Estimasi Biaya Harian
+
+| Skenario | Per Task | Per Hari (50 task) |
+|----------|----------|-------------------|
+| **Full DeepSeek** (V3→R1→V3) | ~$0.003–0.008 | **$0.15–0.40** 🔥 |
+
+---
+
+## 🚀 Setup
+
+```bash
+# 1. Set OpenRouter API Key
+export OPENROUTER_API_KEY=sk-or-v1-xxxxx
+# atau via /login di pi, pilih OpenRouter
+
+# 2. Copy models.json
+cp models.json.example ~/.pi/agent/models.json
+
+# 3. Restart pi
+pi
+# atau reload: /reload
+```
+
+---
+
+## ⚠️ Catatan
+
+1. **OpenRouter** butuh akun dan API key dari [openrouter.ai/keys](https://openrouter.ai/keys)
+2. **DeepSeek V3** sangat hemat — cocok untuk development sehari-hari
+3. **DeepSeek R1** selalu menggunakan reasoning — tidak bisa dimatikan
+4. Jika ingin fallback ke **Direct DeepSeek API**, gunakan agent `*-deepseek.md`
+5. Lihat alternatif model lain di OpenRouter: `mistralai/mistral-*`, `google/gemini-*`, dll
 
 ---
 
