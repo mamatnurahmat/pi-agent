@@ -1,0 +1,14 @@
+node_modules/
+npm/
+tmp/
+sessions/
+auth.json
+locks.json
+telegram.json
+settings.json
+agent/bin/
+agent/skills/
+agent/prompts/cek-commit.md
+agent/prompts/git.md
+*.log
+.DS_Store
