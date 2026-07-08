@@ -26,90 +26,90 @@ PI_ZSHRC="$HOME/.zshrc"
 echo -e "\n${BOLD}${CYAN}"
 echo '  ╔═══════════════════════════════════════════════╗'
 echo '  ║        🚀 pi-agent — First Time Setup         ║'
-echo '  ║   Multi-Agent System untuk Pi Coding Agent    ║'
+echo '  ║   Multi-Agent System for Pi Coding Agent      ║'
 echo '  ╚═══════════════════════════════════════════════╝'
 echo -e "${NC}"
 echo -e "  Assalamu'alaikum warahmatullahi wabarakatuh 🕌"
-echo -e "  Selamat datang di setup pi-agent!\n"
+echo -e "  Welcome to pi-agent setup!\n"
 
 # ============================================================
-# STEP 1: Cek Prasyarat
+# STEP 1: Check Prerequisites
 # ============================================================
-log_step "Langkah 1/6 — Cek Prasyarat"
+log_step "Step 1/6 — Check Prerequisites"
 
 PREREQ_OK=true
 
 if command -v pi &>/dev/null; then
     PI_VER=$(pi --version 2>/dev/null || echo "?")
-    log_ok "pi terinstall — v$PI_VER"
+    log_ok "pi installed — v$PI_VER"
 else
-    log_warn "pi belum terinstall. Install dulu:"
+    log_warn "pi not installed. Install it:"
     echo "  curl -fsSL https://pi.dev/install.sh | sh"
     PREREQ_OK=false
 fi
 
 if command -v git &>/dev/null; then
-    log_ok "git tersedia"
+    log_ok "git available"
 else
-    log_error "git tidak ditemukan"
+    log_error "git not found"
     PREREQ_OK=false
 fi
 
 if command -v kubectl &>/dev/null; then
-    log_ok "kubectl tersedia"
+    log_ok "kubectl available"
 else
-    log_warn "kubectl tidak ditemukan (skip)"
+    log_warn "kubectl not found (skip)"
 fi
 
 if command -v curl &>/dev/null; then
-    log_ok "curl tersedia"
+    log_ok "curl available"
 else
-    log_error "curl tidak ditemukan"
+    log_error "curl not found"
     PREREQ_OK=false
 fi
 
-[ "$PREREQ_OK" = false ] && { log_error "Install prerequisites first"; exit 1; }
+[ "$PREREQ_OK" = false ] && { log_error "Please install prerequisites first"; exit 1; }
 
 # ============================================================
 # STEP 2: OpenRouter API Key
 # ============================================================
-log_step "Langkah 2/6 — OpenRouter API Key"
+log_step "Step 2/6 — OpenRouter API Key"
 
-echo -e "  Model default: ${BOLD}DeepSeek V3${NC} (\$0.30/1M token)"
-echo -e "  Dapatkan key di: ${CYAN}https://openrouter.ai/keys${NC}\n"
+echo -e "  Default model: ${BOLD}DeepSeek V3${NC} (\$0.30/1M tokens)"
+echo -e "  Get your key at: ${CYAN}https://openrouter.ai/keys${NC}\n"
 
 if [ -n "${OPENROUTER_API_KEY:-}" ]; then
-    log_ok "OPENROUTER_API_KEY sudah terdeteksi"
+    log_ok "OPENROUTER_API_KEY already detected"
     echo "  Key: ${OPENROUTER_API_KEY:0:20}..."
 else
-    echo -n "➤ Masukkan OpenRouter API Key (sk-or-v1-...): "
+    echo -n "➤ Enter OpenRouter API Key (sk-or-v1-...): "
     read -r OR_KEY
     if [ -z "$OR_KEY" ]; then
-        log_warn "API Key kosong — bisa diisi nanti via /login di pi"
+        log_warn "API Key empty — can set later via /login in pi"
     else
         SHELL_RC="$PI_BASHRC"; [ -f "$PI_ZSHRC" ] && SHELL_RC="$PI_ZSHRC"
         echo "" >> "$SHELL_RC"
         echo "# pi-agent: OpenRouter API Key" >> "$SHELL_RC"
         echo "export OPENROUTER_API_KEY=$OR_KEY" >> "$SHELL_RC"
         export OPENROUTER_API_KEY="$OR_KEY"
-        log_ok "API Key disimpan ke $SHELL_RC"
+        log_ok "API Key saved to $SHELL_RC"
 
         mkdir -p "$PI_AGENT_DIR"
         echo "{\"openrouter\":{\"type\":\"api_key\",\"key\":\"$OR_KEY\"}}" > "$PI_AUTH"
         chmod 600 "$PI_AUTH"
-        log_ok "API Key juga disimpan ke auth.json"
+        log_ok "API Key also saved to auth.json"
     fi
 fi
 
 # ============================================================
-# STEP 3: Pilih Model
+# STEP 3: Choose Model
 # ============================================================
-log_step "Langkah 3/6 — Pilih Model Default"
+log_step "Step 3/6 — Choose Default Model"
 
-echo "  ${BOLD}1)${NC} DeepSeek V3 + R1 ✅ Paling Hemat (\$0.15-0.40/hari)"
-echo "  ${BOLD}2)${NC} Claude Sonnet + Haiku 🔥 Kualitas Terbaik (\$1.25-3.00/hari)"
-echo "  ${BOLD}3)${NC} Mixed (DeepSeek Scout + Claude Worker) ⚖️ Balance"
-echo -n "➤ Pilihan [1-3] (default: 1): "
+echo "  ${BOLD}1)${NC} DeepSeek V3 + R1 ✅ Most Affordable (\$0.15-0.40/day)"
+echo "  ${BOLD}2)${NC} Claude Sonnet + Haiku 🔥 Best Quality (\$1.25-3.00/day)"
+echo "  ${BOLD}3)${NC} Mixed (DeepSeek Scout + Claude Worker) ⚖️ Balanced"
+echo -n "➤ Choice [1-3] (default: 1): "
 read -r MODEL_CHOICE
 MODEL_CHOICE="${MODEL_CHOICE:-1}"
 
@@ -129,7 +129,6 @@ case "$MODEL_CHOICE" in
   }
 }
 EOF
-        # Update agents
         for f in scout daily-devops; do
             sed -i 's|model: deepseek/deepseek-chat|model: anthropic/claude-3-5-haiku|' "$PI_DIR/agent/agents/$f.md"
         done
@@ -156,10 +155,9 @@ EOF
 EOF
         sed -i 's|model: deepseek/deepseek-r1|model: anthropic/claude-sonnet-4|' "$PI_DIR/agent/agents/planner.md" "$PI_DIR/agent/agents/reviewer.md" "$PI_DIR/agent/agents/debugger.md"
         sed -i 's|model: deepseek/deepseek-chat|model: anthropic/claude-sonnet-4|' "$PI_DIR/agent/agents/worker.md"
-        # scout & devops tetap DeepSeek
         ;;
     *)
-        log_ok "Model: DeepSeek V3 + R1 (Paling Hemat)"
+        log_ok "Model: DeepSeek V3 + R1 (Most Affordable)"
         cp "$PI_DIR/models.json.example" /tmp/pi-models.json
         ;;
 esac
@@ -168,33 +166,29 @@ cp /tmp/pi-models.json "$PI_MODELS"
 log_ok "Model config → $PI_MODELS"
 
 # ============================================================
-# STEP 4: Integrasi Pi
+# STEP 4: Pi Integration
 # ============================================================
-log_step "Langkah 4/6 — Integrasi ke Pi"
+log_step "Step 4/6 — Pi Integration"
 
-# Cek apakah repo sudah diclone ke ~/.pi
 if [ -d "$PI_DIR/.git" ]; then
-    log_ok "Repo pi-agent sudah di ~/.pi"
+    log_ok "pi-agent repo already at ~/.pi"
 else
-    echo -n "➤ Clone repo pi-agent ke ~/.pi? (Y/n): "
+    echo -n "➤ Clone pi-agent repo to ~/.pi? (Y/n): "
     read -r CLONE
     if [[ ! "$CLONE" =~ ^[Nn]$ ]]; then
         git clone https://github.com/mamatnurahmat/pi-agent.git "$PI_DIR.tmp"
-        # Backup file yang mungkin bentrok
         for f in auth.json settings.json telegram.json locks.json; do
             [ -f "$PI_DIR/agent/$f" ] && cp "$PI_DIR/agent/$f" /tmp/
         done
         cp -r "$PI_DIR.tmp/"* "$PI_DIR/"
         rm -rf "$PI_DIR.tmp"
-        # Restore file personal
         for f in auth.json settings.json telegram.json locks.json; do
             [ -f "/tmp/$f" ] && cp "/tmp/$f" "$PI_DIR/agent/$f"
         done
-        log_ok "Repo cloned ke ~/.pi"
+        log_ok "Repo cloned to ~/.pi"
     fi
 fi
 
-# Pi settings
 PI_SETTINGS="$PI_AGENT_DIR/settings.json"
 if [ ! -f "$PI_SETTINGS" ]; then
     cat > "$PI_SETTINGS" << 'EOF'
@@ -203,52 +197,52 @@ if [ ! -f "$PI_SETTINGS" ]; then
   "defaultProjectTrust": "ask"
 }
 EOF
-    log_ok "Default settings.json dibuat"
+    log_ok "Default settings.json created"
 fi
 
 # ============================================================
-# STEP 5: Info & Verifikasi
+# STEP 5: Verify
 # ============================================================
-log_step "Langkah 5/6 — Verifikasi"
+log_step "Step 5/6 — Verify"
 
-echo "  File yang sudah siap:"
-[ -f "$PI_MODELS" ]         && log_ok "models.json"          || log_warn "models.json belum ada"
-[ -f "$PI_AUTH" ]           && log_ok "auth.json"            || log_warn "auth.json belum ada (nanti /login)"
-[ -d "$PI_DIR/agent" ]      && log_ok "agent/ directory"     || log_warn "agent/ belum ada"
-[ -f "$PI_DIR/agent/APPEND_SYSTEM.md" ] && log_ok "APPEND_SYSTEM.md (etika Islami)" || log_warn "APPEND_SYSTEM.md belum ada"
+echo "  Ready files:"
+[ -f "$PI_MODELS" ]         && log_ok "models.json"          || log_warn "models.json missing"
+[ -f "$PI_AUTH" ]           && log_ok "auth.json"            || log_warn "auth.json missing (set later via /login)"
+[ -d "$PI_DIR/agent" ]      && log_ok "agent/ directory"     || log_warn "agent/ missing"
+[ -f "$PI_DIR/agent/APPEND_SYSTEM.md" ] && log_ok "APPEND_SYSTEM.md (Islamic ethics)" || log_warn "APPEND_SYSTEM.md missing"
 
 echo ""
-echo -n "➤ Jalankan verifikasi koneksi OpenRouter? (y/N): "
+echo -n "➤ Verify OpenRouter connection? (y/N): "
 read -r VERIFY
 if [[ "$VERIFY" =~ ^[Yy]$ ]]; then
-    echo "  Mencoba koneksi ke OpenRouter..."
+    echo "  Testing connection to OpenRouter..."
     if [ -n "${OPENROUTER_API_KEY:-}" ]; then
         RESP=$(curl -s -w "\n%{http_code}" https://openrouter.ai/api/v1/models \
           -H "Authorization: Bearer $OPENROUTER_API_KEY" 2>/dev/null || true)
         HTTP_CODE=$(echo "$RESP" | tail -1)
         if [ "$HTTP_CODE" = "200" ]; then
-            log_ok "Koneksi ke OpenRouter berhasil!"
+            log_ok "Connected to OpenRouter successfully!"
         else
-            log_warn "Gagal connect ke OpenRouter (HTTP $HTTP_CODE). Cek API key."
+            log_warn "Failed to connect to OpenRouter (HTTP $HTTP_CODE). Check API key."
         fi
     else
-        log_warn "OPENROUTER_API_KEY belum diset, skip verifikasi"
+        log_warn "OPENROUTER_API_KEY not set, skipping verification"
     fi
 fi
 
 # ============================================================
-# STEP 6: Selesai
+# STEP 6: Done
 # ============================================================
-log_step "Langkah 6/6 — Selesai! 🎉"
+log_step "Step 6/6 — Done! 🎉"
 
-echo -e "  ${BOLD}pi-agent siap digunakan!${NC}"
+echo -e "  ${BOLD}pi-agent is ready to use!${NC}"
 echo ""
-echo -e "  Jalankan ${CYAN}pi${NC} dan coba perintah berikut:\n"
-echo -e "  ${GREEN}/subagent scout \"Cari file README\"${NC}"
-echo -e "  ${GREEN}/subagent daily-devops \"Jalankan daily devops routine\"${NC}"
-echo -e "  ${GREEN}/subagent chain '\"'[{\\\"agent\\\":\\\"scout\\\",\\\"task\\\":\\\"Cari semua API\\\"},{\\\"agent\\\":\\\"planner\\\",\\\"task\\\":\\\"Buat rencana\"}]'\"'${NC}"
+echo -e "  Run ${CYAN}pi${NC} and try these commands:\n"
+echo -e "  ${GREEN}/subagent scout \"Find all README files\"${NC}"
+echo -e "  ${GREEN}/subagent daily-devops \"Run daily devops routine\"${NC}"
+echo -e "  ${GREEN}/subagent chain '\"'[{\\\"agent\\\":\\\"scout\\\",\\\"task\\\":\\\"Find all APIs\\\"},{\\\"agent\\\":\\\"planner\\\",\\\"task\\\":\\\"Create plan\"}]'\"'${NC}"
 echo ""
-echo -e "  📖 Dokumentasi: ${CYAN}https://github.com/mamatnurahmat/pi-agent${NC}"
+echo -e "  📖 Documentation: ${CYAN}https://github.com/mamatnurahmat/pi-agent${NC}"
 echo ""
-echo -e "  ${BOLD}Barakallah, selamat bekerja! 🤲${NC}"
+echo -e "  ${BOLD}Barakallah, happy coding! 🤲${NC}"
 echo ""
