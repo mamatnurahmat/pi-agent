@@ -1,0 +1,32 @@
+apiVersion: v1
+kind: Service
+metadata:
+  annotations:
+    meta.helm.sh/release-name: saas-be-access-module
+    meta.helm.sh/release-namespace: production-saas
+  labels:
+    app: saas-be-access-module
+    app.kubernetes.io/instance: production-saas
+    app.kubernetes.io/managed-by: Helm
+    env: production
+    project: saas
+    role: back
+  name: saas-be-access-module
+  namespace: production-saas
+spec:
+  internalTrafficPolicy: Cluster
+  ipFamilies:
+    - IPv4
+  ipFamilyPolicy: SingleStack
+  ports:
+    - name: http
+      port: 80
+      protocol: TCP
+      targetPort: http
+  selector:
+    app: saas-be-access-module
+    env: production
+    project: saas
+    role: back
+  sessionAffinity: None
+  type: ClusterIP

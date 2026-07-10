@@ -1,0 +1,32 @@
+apiVersion: v1
+kind: Service
+metadata:
+  annotations:
+    meta.helm.sh/release-name: saas-be-access-manager
+    meta.helm.sh/release-namespace: production-saas
+  labels:
+    app: saas-be-access-manager
+    app.kubernetes.io/instance: production-saas
+    app.kubernetes.io/managed-by: Helm
+    env: production
+    project: saas
+    role: front
+  name: saas-be-access-manager
+  namespace: production-saas
+spec:
+  internalTrafficPolicy: Cluster
+  ipFamilies:
+    - IPv4
+  ipFamilyPolicy: SingleStack
+  ports:
+    - name: http
+      port: 9140
+      protocol: TCP
+      targetPort: http
+  selector:
+    app: saas-be-access-manager
+    env: production
+    project: saas
+    role: front
+  sessionAffinity: None
+  type: ClusterIP
