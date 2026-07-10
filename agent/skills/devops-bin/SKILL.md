@@ -21,7 +21,6 @@ You have access to several custom bash scripts located in `~/.pi/agent/bin/`. Yo
 *   `k8s-logs <pod_name> <namespace> [tail_lines]` - Gets logs for a pod.
 *   `set-image <deployment> <namespace> <image_tag>` - Updates the image of a deployment.
 *   `get-file-secret <namespace>` - Generates kubernetes secret yaml based on config files.
-*   `patch-dotenv-go <namespace> <deployment>` - Patch deployment dengan volumeMount (tz-config, file-config-volume) dan volume (hostPath Asia/Jakarta, secret file-config-{deploy}). Juga export YAML ke `{deploy}_deployment.yaml`.
 *   `match-secret <file>` - Matches secrets/envs.
 *   `is-match <args>` / `is-match-ns <args>` - Utility scripts for matching deployments with repos.
 
