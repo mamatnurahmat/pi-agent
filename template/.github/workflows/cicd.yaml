@@ -1,0 +1,395 @@
+name: CI/CD Pipeline - plus-be-transaction-module
+
+on:
+  push:
+    branches:
+      - develop
+      - staging
+    tags:
+      - "v*"
+
+permissions:
+  issues: write
+  contents: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  IMAGE_NAME: plus-be-transaction-module
+  ORG_REGISTRY: loyaltolpi
+  NTFY_TOPIC: qoinplus
+  NTFY_URL: https://ntfy.sh
+  GITOPS_ORG: Qoin-Digital-Indonesia
+  GITOPS_REPO: gitops
+  GITOPS_PROJECT: qoinplus
+  PROJECT: qoinplus
+  PORT: 9106
+
+jobs:
+  # ─────────────────────────────────────────────
+  # Determine environment & image tag
+  # ─────────────────────────────────────────────
+  setup:
+    name: 🔍 Setup Environment
+    runs-on: ubuntu-latest
+    outputs:
+      env: ${{ steps.ctx.outputs.env }}
+      image_tag: ${{ steps.ctx.outputs.image_tag }}
+      is_production: ${{ steps.ctx.outputs.is_production }}
+      commit_short: ${{ steps.meta.outputs.commit_short }}
+      commit_date: ${{ steps.meta.outputs.commit_date }}
+      commit_author: ${{ steps.meta.outputs.commit_author }}
+      commit_message: ${{ steps.meta.outputs.commit_message }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine context
+        id: ctx
+        run: |
+          REF="${GITHUB_REF}"
+          echo "REF: $REF"
+          if [[ "$REF" == refs/tags/v* ]]; then
+            TAG="${GITHUB_REF_NAME}"
+            if ! git branch -r --contains HEAD | grep -qE 'origin/(master|main)'; then
+              echo "❌ ERROR: Tag ${TAG} tidak dibuat dari branch master atau main. Rejecting."
+              exit 1
+            fi
+            echo "env=production"      >> "$GITHUB_OUTPUT"
+            echo "image_tag=${TAG}"    >> "$GITHUB_OUTPUT"
+            echo "is_production=true"  >> "$GITHUB_OUTPUT"
+            echo "🏷️  Tag release: ${TAG} → ENV=production"
+          elif [[ "$REF" == refs/heads/staging ]]; then
+            SHORT_SHA=$(git rev-parse --short HEAD)
+            echo "env=staging"             >> "$GITHUB_OUTPUT"
+            echo "image_tag=${SHORT_SHA}"  >> "$GITHUB_OUTPUT"
+            echo "is_production=false"     >> "$GITHUB_OUTPUT"
+            echo "🚀 Branch staging → ENV=staging, TAG=${SHORT_SHA}"
+          elif [[ "$REF" == refs/heads/develop ]]; then
+            SHORT_SHA=$(git rev-parse --short HEAD)
+            echo "env=develop"             >> "$GITHUB_OUTPUT"
+            echo "image_tag=${SHORT_SHA}"  >> "$GITHUB_OUTPUT"
+            echo "is_production=false"     >> "$GITHUB_OUTPUT"
+            echo "🔧 Branch develop → ENV=develop, TAG=${SHORT_SHA}"
+          else
+            echo "Unknown ref: $REF" && exit 1
+          fi
+
+      - name: Collect commit metadata
+        id: meta
+        run: |
+          echo "commit_short=$(git rev-parse --short HEAD)"   >> "$GITHUB_OUTPUT"
+          echo "commit_date=$(git log -1 --format='%ci')"     >> "$GITHUB_OUTPUT"
+          echo "commit_author=$(git log -1 --format='%an')"   >> "$GITHUB_OUTPUT"
+          MSG=$(git log -1 --format='%s' | head -c 100)
+          echo "commit_message=${MSG}"                         >> "$GITHUB_OUTPUT"
+
+      - name: 🔔 Notify ntfy – Pipeline Started
+        run: |
+          curl -s -X POST "${{ env.NTFY_URL }}/${{ env.NTFY_TOPIC }}" \
+            -H "Title: 🚦 CI/CD Started – ${{ env.IMAGE_NAME }}" \
+            -H "Priority: default" \
+            -H "Tags: rocket,construction" \
+            -d "$(cat <<EOF
+          🔧 Pipeline dimulai
+          📦 Project   : ${{ env.IMAGE_NAME }}
+          🌿 Branch/Tag: ${{ github.ref_name }}
+          🔑 Commit    : ${{ steps.meta.outputs.commit_short }} (${{ github.sha }})
+          📅 Tanggal   : ${{ steps.meta.outputs.commit_date }}
+          👤 Author    : ${{ steps.meta.outputs.commit_author }}
+          💬 Message   : ${{ steps.meta.outputs.commit_message }}
+          🔗 Run URL   : ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          EOF
+          )"
+
+  # ─────────────────────────────────────────────
+  # Manual Approval — hanya untuk production (tag v*)
+  # develop & staging: job ini di-skip otomatis
+  # ─────────────────────────────────────────────
+  approval:
+    name: 🚦 Manual Approval (Production Only)
+    if: needs.setup.outputs.is_production == 'true'
+    runs-on: ubuntu-latest
+    needs: setup
+    timeout-minutes: 60
+    steps:
+      - name: Wait for Approval
+        uses: trstringer/manual-approval@v1
+        with:
+          secret: ${{ github.token }}
+          approvers: mamatnurahmat
+          minimum-approvals: 1
+          issue-title: "Deploying ${{ needs.setup.outputs.image_tag }} to Production"
+          issue-body: "Mohon approve atau deny deployment versi ${{ needs.setup.outputs.image_tag }} ke Production. Timeout 1 Jam."
+          exclude-workflow-initiator-as-approver: false
+
+  # ─────────────────────────────────────────────
+  # Build & Release Docker image
+  # - develop/staging : langsung jalan (approval skipped)
+  # - production      : tunggu approval sukses dulu
+  # ─────────────────────────────────────────────
+  build-and-release:
+    name: 🏗️🚀 Build & Release (${{ needs.setup.outputs.env }})
+    runs-on: ubuntu-latest
+    needs: [setup, approval]
+    if: |
+      always() &&
+      needs.setup.result == 'success' &&
+      (
+        needs.setup.outputs.is_production == 'false' ||
+        needs.approval.result == 'success'
+      )
+    env:
+      ENV: ${{ needs.setup.outputs.env }}
+      IMAGE_TAG: ${{ needs.setup.outputs.image_tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver: docker
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USER }}
+          password: ${{ secrets.DOCKERHUB_PASSWORD }}
+
+      - name: 🏗️ Build image via Makefile
+        run: make build ENV=${{ env.ENV }}
+        env:
+          DOCKER_BUILDKIT: "1"
+          COMPOSE_DOCKER_CLI_BUILD: "1"
+          ORG_REGISTRY: ${{ env.ORG_REGISTRY }}
+          IMAGE_NAME: ${{ env.IMAGE_NAME }}
+          IMAGE_TAG: ${{ env.IMAGE_TAG }}
+          BUILD_ENV: ${{ env.ENV }}
+          GITHUB_USER: ${{ secrets.GIT_USER }}
+          GITHUB_PASSWORD: ${{ secrets.GIT_PASSWORD }}
+          PORT: ${{ env.PORT }}
+          PROJECT: ${{ env.PROJECT }}
+
+      - name: 🔔 Notify ntfy – Build Success
+        if: success()
+        run: |
+          curl -s -X POST "${{ env.NTFY_URL }}/${{ env.NTFY_TOPIC }}" \
+            -H "Title: ✅ Build OK – ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}" \
+            -H "Priority: default" \
+            -H "Tags: white_check_mark,whale" \
+            -d "$(cat <<EOF
+          ✅ Docker image berhasil di-build
+          📦 Image     : ${{ env.ORG_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+          🌿 Branch/Tag: ${{ github.ref_name }}
+          🏷️ ENV        : ${{ env.ENV }}
+          🔑 Commit    : ${{ needs.setup.outputs.commit_short }} (${{ github.sha }})
+          📅 Tanggal   : ${{ needs.setup.outputs.commit_date }}
+          👤 Author    : ${{ needs.setup.outputs.commit_author }}
+          💬 Message   : ${{ needs.setup.outputs.commit_message }}
+          🔗 Run URL   : ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          EOF
+          )"
+
+      - name: 🔔 Notify ntfy – Build Failed
+        if: failure()
+        run: |
+          curl -s -X POST "${{ env.NTFY_URL }}/${{ env.NTFY_TOPIC }}" \
+            -H "Title: ❌ Build GAGAL – ${{ env.IMAGE_NAME }}" \
+            -H "Priority: high" \
+            -H "Tags: x,rotating_light" \
+            -d "$(cat <<EOF
+          ❌ Docker build GAGAL!
+          📦 Project   : ${{ env.IMAGE_NAME }}
+          🌿 Branch/Tag: ${{ github.ref_name }}
+          🏷️ ENV        : ${{ env.ENV }}
+          🔑 Commit    : ${{ needs.setup.outputs.commit_short }} (${{ github.sha }})
+          📅 Tanggal   : ${{ needs.setup.outputs.commit_date }}
+          👤 Author    : ${{ needs.setup.outputs.commit_author }}
+          💬 Message   : ${{ needs.setup.outputs.commit_message }}
+          ⚠️ Cek log: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          EOF
+          )"
+
+      - name: 🚀 Release (push) image via Makefile
+        run: make release ENV=${{ env.ENV }}
+        env:
+          DOCKER_BUILDKIT: "1"
+          ORG_REGISTRY: ${{ env.ORG_REGISTRY }}
+          IMAGE_NAME: ${{ env.IMAGE_NAME }}
+          IMAGE_TAG: ${{ env.IMAGE_TAG }}
+          BUILD_ENV: ${{ env.ENV }}
+
+      - name: GitHub Step Summary
+        if: success()
+        run: |
+          echo "## ✅ Release Summary" >> $GITHUB_STEP_SUMMARY
+          echo "| Key          | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Environment  | \`${{ env.ENV }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Image        | \`${{ env.ORG_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Commit       | \`${{ needs.setup.outputs.commit_short }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Date         | \`${{ needs.setup.outputs.commit_date }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Author       | \`${{ needs.setup.outputs.commit_author }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Message      | ${{ needs.setup.outputs.commit_message }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Triggered by | \`${{ github.ref }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Actor        | @${{ github.actor }} |" >> $GITHUB_STEP_SUMMARY
+
+      - name: 🔔 Notify ntfy – Release Success
+        if: success()
+        run: |
+          curl -s -X POST "${{ env.NTFY_URL }}/${{ env.NTFY_TOPIC }}" \
+            -H "Title: 🎉 Release OK – ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}" \
+            -H "Priority: default" \
+            -H "Tags: tada,ship" \
+            -d "$(cat <<EOF
+          🎉 Image berhasil di-push ke Docker Hub!
+          📦 Image     : ${{ env.ORG_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+          🌿 Branch/Tag: ${{ github.ref_name }}
+          🏷️ ENV        : ${{ env.ENV }}
+          🔑 Commit    : ${{ needs.setup.outputs.commit_short }} (${{ github.sha }})
+          📅 Tanggal   : ${{ needs.setup.outputs.commit_date }}
+          👤 Author    : ${{ needs.setup.outputs.commit_author }}
+          💬 Message   : ${{ needs.setup.outputs.commit_message }}
+          🔗 Run URL   : ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          EOF
+          )"
+
+      - name: 🔔 Notify ntfy – Release Failed
+        if: failure()
+        run: |
+          curl -s -X POST "${{ env.NTFY_URL }}/${{ env.NTFY_TOPIC }}" \
+            -H "Title: ❌ Release GAGAL – ${{ env.IMAGE_NAME }}" \
+            -H "Priority: urgent" \
+            -H "Tags: x,rotating_light,fire" \
+            -d "$(cat <<EOF
+          ❌ Docker push/release GAGAL!
+          📦 Project   : ${{ env.IMAGE_NAME }}
+          🌿 Branch/Tag: ${{ github.ref_name }}
+          🏷️ ENV        : ${{ env.ENV }}
+          🔑 Commit    : ${{ needs.setup.outputs.commit_short }} (${{ github.sha }})
+          📅 Tanggal   : ${{ needs.setup.outputs.commit_date }}
+          👤 Author    : ${{ needs.setup.outputs.commit_author }}
+          💬 Message   : ${{ needs.setup.outputs.commit_message }}
+          ⚠️ Cek log: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          EOF
+          )"
+
+  # ─────────────────────────────────────────────
+  # GitOps: Update image tag in deployment repo
+  # Jalan untuk semua env setelah build-and-release sukses
+  # ─────────────────────────────────────────────
+  gitops-update:
+    name: 🔄 GitOps Update (${{ needs.setup.outputs.env }}-qoinplus)
+    runs-on: ubuntu-latest
+    needs: [setup, build-and-release]
+    if: |
+      always() &&
+      needs.setup.result == 'success' &&
+      needs.build-and-release.result == 'success'
+    env:
+      ENV: ${{ needs.setup.outputs.env }}
+      IMAGE_TAG: ${{ needs.setup.outputs.image_tag }}
+    steps:
+      - name: Clone gitops repo
+        run: |
+          GITOPS_URL="https://${{ secrets.GIT_USER }}:${{ secrets.GIT_PASSWORD }}@github.com/${{ env.GITOPS_ORG }}/gitops.git"
+          git clone --depth=1 "$GITOPS_URL" gitops-repo
+
+      - name: Configure git identity
+        working-directory: gitops-repo
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Update image tag in deployment.yaml
+        working-directory: gitops-repo
+        run: |
+          NS="${{ env.ENV }}-${{ env.GITOPS_PROJECT }}"
+          APP="${{ env.IMAGE_NAME }}"
+          DEPLOY_FILE="k8s/${NS}/${APP}_deployment.yaml"
+          IMAGE_FULL="${{ env.ORG_REGISTRY }}/${APP}"
+          NEW_TAG="${{ env.IMAGE_TAG }}"
+          echo "📂 Deployment path : ${DEPLOY_FILE}"
+          echo "🖼️  Image           : ${IMAGE_FULL}"
+          echo "🏷️  New tag          : ${NEW_TAG}"
+          if [[ ! -f "${DEPLOY_FILE}" ]]; then
+            echo "❌ File tidak ditemukan: ${DEPLOY_FILE}"
+            exit 1
+          fi
+          sed -E -i "s|(image:[ \t]*[\"']?)${IMAGE_FULL}:[a-zA-Z0-9_.-]+|\1${IMAGE_FULL}:${NEW_TAG}|g" "${DEPLOY_FILE}"
+          echo ""
+          echo "✅ Hasil update:"
+          grep -E "image:[ \t]*" "${DEPLOY_FILE}"
+
+      - name: Commit & push changes
+        working-directory: gitops-repo
+        run: |
+          NS="${{ env.ENV }}-${{ env.GITOPS_PROJECT }}"
+          APP="${{ env.IMAGE_NAME }}"
+          DEPLOY_FILE="k8s/${NS}/${APP}_deployment.yaml"
+          git add "${DEPLOY_FILE}"
+          if git diff --cached --quiet; then
+            echo "ℹ️  Tidak ada perubahan pada ${DEPLOY_FILE}, skip commit."
+            exit 0
+          fi
+          COMMIT_MSG="chore(gitops): update ${APP} → ${{ env.IMAGE_TAG }} [${NS}]
+
+          Image    : ${{ env.ORG_REGISTRY }}/${APP}:${{ env.IMAGE_TAG }}
+          File     : ${DEPLOY_FILE}
+          Commit   : ${{ needs.setup.outputs.commit_short }} (${{ github.sha }})
+          Author   : ${{ needs.setup.outputs.commit_author }}
+          Date     : ${{ needs.setup.outputs.commit_date }}
+          Message  : ${{ needs.setup.outputs.commit_message }}
+          Run URL  : ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          git commit -m "${COMMIT_MSG}"
+          GITOPS_URL="https://${{ secrets.GIT_USER }}:${{ secrets.GIT_PASSWORD }}@github.com/${{ env.GITOPS_ORG }}/gitops.git"
+          git push "$GITOPS_URL" HEAD:main
+
+      - name: 🔔 Notify ntfy – GitOps Success
+        if: success()
+        run: |
+          NS="${{ env.ENV }}-${{ env.GITOPS_PROJECT }}"
+          APP="${{ env.IMAGE_NAME }}"
+          DEPLOY_FILE="k8s/${NS}/${APP}_deployment.yaml"
+          curl -s -X POST "${{ env.NTFY_URL }}/${{ env.NTFY_TOPIC }}" \
+            -H "Title: 🔄 GitOps Updated – ${NS}" \
+            -H "Priority: default" \
+            -H "Tags: arrows_counterclockwise,kubernetes" \
+            -d "$(cat <<EOF
+          🔄 Deployment berhasil diupdate!
+          📦 Image     : ${{ env.ORG_REGISTRY }}/${APP}:${{ env.IMAGE_TAG }}
+          📂 File      : ${DEPLOY_FILE}
+          🌿 Branch/Tag: ${{ github.ref_name }}
+          🏷️ ENV        : ${{ env.ENV }}
+          🔑 Commit    : ${{ needs.setup.outputs.commit_short }} (${{ github.sha }})
+          📅 Tanggal   : ${{ needs.setup.outputs.commit_date }}
+          👤 Author    : ${{ needs.setup.outputs.commit_author }}
+          💬 Message   : ${{ needs.setup.outputs.commit_message }}
+          🔗 GitOps    : https://github.com/${{ env.GITOPS_ORG }}/gitops/blob/main/${DEPLOY_FILE}
+          EOF
+          )"
+
+      - name: 🔔 Notify ntfy – GitOps Failed
+        if: failure()
+        run: |
+          NS="${{ env.ENV }}-${{ env.GITOPS_PROJECT }}"
+          APP="${{ env.IMAGE_NAME }}"
+          curl -s -X POST "${{ env.NTFY_URL }}/${{ env.NTFY_TOPIC }}" \
+            -H "Title: ❌ GitOps GAGAL – ${APP}" \
+            -H "Priority: urgent" \
+            -H "Tags: x,rotating_light" \
+            -d "$(cat <<EOF
+          ❌ GitOps update GAGAL!
+          📦 Image     : ${{ env.ORG_REGISTRY }}/${APP}:${{ env.IMAGE_TAG }}
+          📂 Namespace : ${NS}
+          🌿 Branch/Tag: ${{ github.ref_name }}
+          🔑 Commit    : ${{ needs.setup.outputs.commit_short }} (${{ github.sha }})
+          📅 Tanggal   : ${{ needs.setup.outputs.commit_date }}
+          👤 Author    : ${{ needs.setup.outputs.commit_author }}
+          ⚠️ Cek log: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          EOF
+          )"

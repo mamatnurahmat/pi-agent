@@ -1,0 +1,80 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  annotations:
+    meta.helm.sh/release-name: saas-be-access-module
+    meta.helm.sh/release-namespace: production-saas
+  labels:
+    app: saas-be-access-module
+    app.kubernetes.io/instance: production-saas
+    app.kubernetes.io/managed-by: Helm
+    env: production
+    language: go
+    project: saas
+    repo: saas-be-access-module
+    role: back
+    secret-file: dotenv
+  name: saas-be-access-module
+  namespace: production-saas
+spec:
+  progressDeadlineSeconds: 600
+  replicas: 0
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      app: saas-be-access-module
+      env: production
+      project: saas
+      role: back
+  strategy:
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+    type: RollingUpdate
+  template:
+    metadata:
+      annotations:
+        field.cattle.io/ports: '[[{"containerPort":80,"dnsName":"saas-be-access-module","kind":"ClusterIP","name":"http","protocol":"TCP"}]]'
+      labels:
+        app: saas-be-access-module
+        env: production
+        project: saas
+        role: back
+    spec:
+      containers:
+        - image: loyaltolpi/saas-be-access-module:v3.0.0
+          imagePullPolicy: IfNotPresent
+          name: saas-be-access-module
+          ports:
+            - containerPort: 80
+              name: http
+              protocol: TCP
+          resources: {}
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          volumeMounts:
+            - mountPath: /etc/localtime
+              name: tz-config
+            - mountPath: /app/.env
+              name: file-config-volume
+              subPath: .env
+      dnsPolicy: ClusterFirst
+      imagePullSecrets:
+        - name: regcred
+      nodeSelector:
+        cce.cloud.com/cce-nodepool: production-ue-nodepool-service
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      securityContext: {}
+      serviceAccount: default
+      serviceAccountName: default
+      terminationGracePeriodSeconds: 30
+      volumes:
+        - hostPath:
+            path: /usr/share/zoneinfo/Asia/Jakarta
+            type: ""
+          name: tz-config
+        - name: file-config-volume
+          secret:
+            defaultMode: 420
+            secretName: file-config-saas-be-access-module

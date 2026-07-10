@@ -1,0 +1,26 @@
+services:
+  plus-be-transaction-module:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      platforms:
+        - linux/amd64
+      args:
+        - PORT=${PORT:-9106}
+        - PROJECT=${PROJECT:-qoinplus}
+        - BRANCH=${BUILD_ENV:-staging}
+      secrets:
+        - github_token
+        - github_user
+    image: ${ORG_REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG:-local}
+    ports:
+      - "${PORT:-9106}:${PORT:-9106}"
+    environment:
+      - BUILD_ENV=${BUILD_ENV:-staging}
+      - PROJECT=${PROJECT:-qoinplus}
+
+secrets:
+  github_token:
+    environment: GITHUB_PASSWORD
+  github_user:
+    environment: GITHUB_USER

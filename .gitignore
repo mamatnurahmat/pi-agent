@@ -12,3 +12,12 @@ agent/prompts/cek-commit.md
 agent/prompts/git.md
 *.log
 .DS_Store
+
+# credential / secret
+models.json
+template/go/k8s/*secret.yaml
+
+# WhatsApp extension - auth & personal data
+agent/extensions/whatsapp-pi/auth/
+agent/extensions/whatsapp-pi/config.json
+agent/extensions/whatsapp-pi/recents/
