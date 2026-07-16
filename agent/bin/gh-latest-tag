@@ -1,0 +1,25 @@
+#!/bin/bash
+
+# Script to get the latest tag matching 'v*' from a GitHub repository
+# Organization is hardcoded to Qoin-Digital-Indonesia
+# Arguments:
+# $1: repo name
+
+ORG="Qoin-Digital-Indonesia"
+REPO="$1"
+
+if [ -z "$REPO" ]; then
+  echo "Usage: $(basename "$0") <repo>"
+  echo "Example: $(basename "$0") saas-be-profile-manager"
+  exit 1
+fi
+
+# Fetch tags using gh api, filter for v*, sort by version, and get the highest
+LATEST_TAG=$(gh api "/repos/${ORG}/${REPO}/tags" --jq '.[].name' | grep '^v' | sort -V | tail -n 1)
+
+if [ -z "$LATEST_TAG" ]; then
+  echo "No tag matching 'v*' found in repository ${ORG}/${REPO}."
+  exit 1
+fi
+
+echo "$LATEST_TAG"

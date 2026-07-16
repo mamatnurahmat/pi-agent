@@ -1,0 +1,26 @@
+#!/bin/bash
+set -euo pipefail
+
+ns="${1?usage: $(basename "$0") <namespace>}"
+org="${2:-Qoin-Digital-Indonesia}"
+csv="${ns}-repo-check.csv"
+
+echo "ns,deploy,repo,note" > "$csv"
+echo "🔍 Scanning namespace: ${ns}"
+echo ""
+
+kubectl get deployment -n "$ns" --no-headers -o name 2>/dev/null | while read d; do
+  deploy=$(echo "$d" | sed 's|deployment.apps/||')
+  printf "  %-45s " "$deploy"
+
+  if gh repo view "${org}/${deploy}" --json name >/dev/null 2>&1; then
+    echo "EXISTS"
+    echo "${ns},${deploy},${org}/${deploy},EXISTS" >> "$csv"
+  else
+    echo "NOT_FOUND"
+    echo "${ns},${deploy},${org}/${deploy},NOT_FOUND" >> "$csv"
+  fi
+done
+
+echo ""
+echo "✅ ${csv} saved"

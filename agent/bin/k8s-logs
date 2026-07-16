@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ns="${1:?usage: k8s-logs <namespace> <app-label>}"
+app="${2:?usage: k8s-logs <namespace> <app-label>}"
+
+kubectl get pods -n "$ns" -l "app=$app" --no-headers -o name \
+  | head -100 \
+  | while read -r pod; do
+      kubectl logs -n "$ns" "$pod" --tail=100 -f 2>/dev/null || true
+    done

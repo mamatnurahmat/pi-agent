@@ -1,0 +1,103 @@
+#!/usr/bin/env python3
+import os
+import json
+import subprocess
+import sys
+
+def load_config(file_path):
+    """
+    Load JSON configuration from a file.
+    """
+    if not os.path.exists(file_path):
+        print(f"Error: {file_path} not found.")
+        return None
+    try:
+        with open(file_path, 'r') as json_file:
+            return json.load(json_file)
+    except json.JSONDecodeError as e:
+        print(f"Error decoding JSON in {file_path}: {e}")
+        return None
+
+def set_env_variables(config):
+    """
+    Set environment variables based on the configuration.
+    """
+    if config:
+        for key, value in config.items():
+            os.environ[key] = str(value)
+
+def docker_image_exists(image_name):
+    """
+    Check if a Docker image exists on Docker Hub.
+    """
+    try:
+        subprocess.run(["docker", "pull", image_name], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        return True
+    except subprocess.CalledProcessError:
+        return False
+
+def build_docker(ref, rebuild=False):
+    """
+    Build and push a Docker image based on the given reference.
+    """
+    print(f"Building Docker image for ref: {ref}")
+    
+    # Load configurations
+    cicd_config = load_config("cicd/cicd.json")
+    auth_config = load_config(os.path.expanduser("~/.devops/auth.json"))
+    
+    # Set environment variables
+    set_env_variables(cicd_config)
+    set_env_variables(auth_config)
+    
+    # Determine tag version and environment
+    if ref in ["develop", "development", "staging", "master"]:
+        commit_id = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"]).decode().strip()
+        tag_version = commit_id
+        env_value = "develop" if ref == "master" else ref
+    else:
+        tag_version = ref
+        env_value = "production" if ref.startswith("v") else ("staging" if ref.endswith("-rc") else "custom")
+    
+    docker_image_name = f"{os.environ.get('REGISTRY')}/{os.environ.get('IMAGE')}:{tag_version}"
+    
+    if not rebuild and docker_image_exists(docker_image_name):
+        print(f"Image {docker_image_name} already exists on Docker Hub. Skipping the build process.")
+        return
+    
+    # Create and use a new builder instance if it doesn't exist
+    try:
+        subprocess.run(["docker", "buildx", "create", "--driver", "cloud", "loyaltolpi/qoin-build", "--use"], check=True)
+    except subprocess.CalledProcessError:
+        print("Using existing builder instance")
+    
+    docker_build_command = [
+        "docker", "buildx", "build",
+        "--sbom=true",
+        "--provenance=true",
+        "--build-arg", f"REGISTRY01={os.environ.get('REGISTRY01_URL')}",
+        "--build-arg", f"BRANCH={env_value}",
+        "--build-arg", f"PROJECT={os.environ.get('IMAGE')}",
+        "--build-arg", f"PORT={os.environ.get('PORT')}",
+        "--build-arg", f"PORT2={os.environ.get('PORT2')}",
+        "--build-arg", f"GITUSERTOKEN={os.environ.get('GITUSERTOKEN')}",
+        "--build-arg", f"BITBUCKET_USER={os.environ.get('BITBUCKET_USER')}",
+        "--build-arg", f"GITHUB_USER={os.environ.get('GITHUB_USER')}",
+        "--build-arg", f"BITBUCKET_TOKEN={os.environ.get('BITBUCKET_TOKEN')}",
+        "--build-arg", f"GITHUB_TOKEN={os.environ.get('GITHUB_TOKEN')}",
+        "--push",  # Add push flag for buildx
+        "-t", docker_image_name,
+        "-f", "Dockerfile", "."
+    ]
+    
+    print(f"Executing buildx command:\n{' '.join(docker_build_command)}")
+    subprocess.run(docker_build_command)
+
+if __name__ == '__main__':
+    if len(sys.argv) < 2:
+        print("Usage: ./script.py <ref> [--rebuild]")
+        sys.exit(1)
+    
+    ref = sys.argv[1]
+    rebuild_flag = "--rebuild" in sys.argv
+    build_docker(ref, rebuild_flag)

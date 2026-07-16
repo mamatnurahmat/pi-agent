@@ -1,0 +1,49 @@
+#!/bin/bash
+# Cek apakah image tag di K8s match dengan latest tag di GitHub
+# Usage: is-match <namespace> <deployment> [repo] [org]
+#   repo: default = nama deployment
+#   org: default = Qoin-Digital-Indonesia
+
+NS="$1"
+DEPLOY="$2"
+REPO="${3:-$DEPLOY}"
+ORG="${4:-Qoin-Digital-Indonesia}"
+
+if [ -z "$NS" ] || [ -z "$DEPLOY" ]; then
+  echo "Usage: $(basename "$0") <namespace> <deployment> [repo] [org]"
+  echo ""
+  echo "Cek apakah image tag di K8s match dengan latest tag di GitHub"
+  echo "  repo: default = nama deployment"
+  echo ""
+  echo "Contoh:"
+  echo "  is-match production-payout pay-be-beneficiary-inquiry-module"
+  echo "  is-match production-saas my-deployment my-repo MyOrg"
+  exit 1
+fi
+
+GH_TAG=$(gh api "/repos/${ORG}/${REPO}/tags" --jq '.[].name' 2>/dev/null | grep '^v' | sort -V | tail -n 1)
+if [ -z "$GH_TAG" ]; then
+  echo "❌ No tag matching 'v*' found in ${ORG}/${REPO}" >&2
+  exit 1
+fi
+
+K8S_IMAGE=$(kubectl get deployment "$DEPLOY" -n "$NS" -o jsonpath="{.spec.template.spec.containers[0].image}" 2>/dev/null)
+if [ -z "$K8S_IMAGE" ]; then
+  echo "❌ Deployment '$DEPLOY' not found in namespace '$NS'" >&2
+  exit 1
+fi
+K8S_TAG=${K8S_IMAGE##*:}
+
+echo "Org/Repo  : ${ORG}/${REPO}"
+echo "Namespace : ${NS}"
+echo "Deployment: ${DEPLOY}"
+echo "---"
+printf "  %-12s %s\n" "GitHub:" "$GH_TAG"
+printf "  %-12s %s\n" "K8s:" "$K8S_TAG"
+echo "---"
+
+if [ "$GH_TAG" = "$K8S_TAG" ]; then
+  echo "✅ MATCH"
+else
+  echo "❌ NOT MATCH"
+fi

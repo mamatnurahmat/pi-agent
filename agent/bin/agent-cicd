@@ -1,0 +1,330 @@
+#!/usr/bin/env python3
+"""agent-cicd: Generate CI/CD files via OpenRouter API.
+
+Simplified from run_openrouter.py — uses only stdlib, no external packages.
+Reads credentials from env (API_KEY or OPENROUTER_API_KEY), same as pi agent.
+"""
+
+import json
+import os
+import sys
+import urllib.request
+import urllib.error
+
+API_URL = "https://openrouter.ai/api/v1/chat/completions"
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def get_api_key():
+    key = os.environ.get("OPENROUTER_API_KEY") or os.environ.get("API_KEY")
+    if not key:
+        print("❌ Error: API_KEY belum di-set.")
+        print("   export API_KEY=\"sk-or-v1-...\"")
+        sys.exit(1)
+    return key
+
+
+def get_model():
+    return os.environ.get("MODEL") or "deepseek/deepseek-v4-flash"
+
+
+def get_repo_info():
+    repo = os.environ.get("GIT_REPO") or os.path.basename(os.getcwd())
+    refs = os.environ.get("GIT_REF") or "branch_name / tag"
+    url = os.environ.get("GIT_URL", "")
+
+    if not url or "github.com" not in url:
+        full_url = f"https://github.com/{os.environ.get('GITHUB_USER', 'user')}/{repo}"
+    else:
+        full_url = url.replace("git@github.com:", "https://github.com/").replace(".git", "")
+        full_url = full_url.replace(".git", "")
+
+    return repo, refs, full_url
+
+
+def call_llm(system_prompt, user_prompt, api_key, model, repo, refs, max_tokens=4096):
+    payload = json.dumps({
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "temperature": 0.1,
+        "max_tokens": max_tokens,
+        "extra_body": {"repo": repo, "refs": refs},
+    }).encode()
+
+    req = urllib.request.Request(
+        API_URL,
+        data=payload,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            data = json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        print(f"❌ HTTP {e.code}: {e.reason}")
+        sys.exit(1)
+    except urllib.error.URLError as e:
+        print(f"❌ Network error: {e.reason}")
+        sys.exit(1)
+
+    text = data["choices"][0]["message"]["content"]
+    # Strip code fences
+    for fence in ("```dockerfile", "```docker", "```yaml", "```makefile", "```make", "```"):
+        text = text.replace(fence, "")
+    return text.strip()
+
+
+# ---------------------------------------------------------------------------
+# System prompts
+# ---------------------------------------------------------------------------
+
+SYSTEM_DOCKERFILE = (
+    "Anda adalah DevOps Agent. Tugas Anda adalah memeriksa dan memperbaiki file Dockerfile.\n"
+    "Jika di dalam Dockerfile terdapat penggunaan `ARG` untuk kredensial git (misalnya "
+    "ARG GITHUB_TOKEN, ARG GITHUB_USER) yang digunakan untuk mendownload module private, "
+    "UBAH baris-baris tersebut agar menggunakan Docker BuildKit secrets.\n"
+    "Ganti bagian tersebut dengan format standar berikut:\n"
+    "ENV GOPRIVATE=\"github.com/Qoin-Digital-Indonesia/*\"\n"
+    "ENV GOTOOLCHAIN=auto\n"
+    "RUN --mount=type=secret,id=github_token \\\n"
+    "    --mount=type=secret,id=github_user \\\n"
+    "    GITHUB_TOKEN=$(cat /run/secrets/github_token) && \\\n"
+    "    GITHUB_USER=$(cat /run/secrets/github_user) && \\\n"
+    "    git config --global url.\"https://${GITHUB_USER}:${GITHUB_TOKEN}@github.com/\".insteadOf "
+    "\"https://github.com/\" && \\\n"
+    "    GONOSUMDB=\"github.com/Qoin-Digital-Indonesia/*\" "
+    "GONOPROXY=\"github.com/Qoin-Digital-Indonesia/*\" go mod download\n\n"
+    "PENTING: Hapus deklarasi `ARG` kredensial tersebut jika ada. "
+    "Jika Dockerfile sudah aman atau tidak memakai kredensial git via ARG, "
+    "kembalikan isi Dockerfile apa adanya tanpa perubahan.\n"
+    "Output HANYA kode Dockerfile tanpa penjelasan atau basa-basi apa pun."
+)
+
+YAML_TEMPLATE = """services:
+  [IMAGE_NAME_DARI_JSON]:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      platforms:
+        - linux/amd64
+      args:
+        - PORT=${PORT:-[PORT_DARI_JSON]}
+        - PROJECT=${PROJECT:-[PROJECT_DARI_JSON]}
+        - BRANCH=${BUILD_ENV:-staging}
+      secrets:
+        - github_token
+        - github_user
+    image: ${ORG_REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG:-local}
+    ports:
+      - "${PORT:-[PORT_DARI_JSON]}:${PORT:-[PORT_DARI_JSON]}"
+    environment:
+      - BUILD_ENV=${BUILD_ENV:-staging}
+      - PROJECT=${PROJECT:-[PROJECT_DARI_JSON]}
+
+secrets:
+  github_token:
+    environment: GITHUB_PASSWORD
+  github_user:
+    environment: GITHUB_USER
+"""
+
+SYSTEM_COMPOSE = (
+    "Anda adalah DevOps Agent. Tugas Anda adalah membuat file compose.yaml murni. "
+    "Gunakan variabel dari file cicd.json yang diberikan untuk mengisi template YAML. "
+    "Aturan mapping dari JSON:\n"
+    "- Gunakan value 'IMAGE' atau 'DEPLOYMENT' sebagai nama service. Jika key tidak ada, abaikan/kosongkan.\n"
+    "- Gunakan value 'PORT' untuk mengganti [PORT_DARI_JSON]. Jika key tidak ada, hapus baris port atau kosongkan.\n"
+    "- Gunakan value 'PROJECT' untuk mengganti [PROJECT_DARI_JSON]. Jika key tidak ada, kosongkan.\n"
+    "- Secara umum, jika sebuah variabel tidak ada di cicd.json, skip atau biarkan kosong.\n\n"
+    "FORMAT WAJIB:\n" + YAML_TEMPLATE + "\n\n"
+    "Output HANYA kode YAML tanpa penjelasan atau basa-basi apa pun."
+)
+
+MAKEFILE_TEMPLATE = """\
+ORG_REGISTRY?={registry}
+IMAGE_NAME?={image_name}
+# Get tag if exactly on a tag, otherwise get 7-char commit hash
+IMAGE_TAG?=$(shell git describe --tags --exact-match 2>/dev/null || git rev-parse --short HEAD)
+ENV?=staging
+PORT?={port}
+PROJECT?={project}
+
+.PHONY: staging production build release run deploy release-staging release-production run-staging run-production deploy-staging deploy-production
+
+# Usage: make staging OR make production (Full Flow: Build -> Release -> Deploy)
+staging:
+\t@$(MAKE) build ENV=staging
+\t@$(MAKE) release ENV=staging
+\t@$(MAKE) deploy ENV=staging
+
+production:
+\t@$(MAKE) build ENV=production
+\t@$(MAKE) release ENV=production
+\t@$(MAKE) deploy ENV=production
+
+# Usage: make build ENV=staging
+build:
+\t@echo "Building $(ENV) image: $(ORG_REGISTRY)/$(IMAGE_NAME):$(IMAGE_TAG)"
+\tORG_REGISTRY=$(ORG_REGISTRY) IMAGE_NAME=$(IMAGE_NAME) IMAGE_TAG=$(IMAGE_TAG) BUILD_ENV=$(ENV) PORT=$(PORT) PROJECT=$(PROJECT) GITHUB_USER=$(GITHUB_USER) GITHUB_PASSWORD=$(GITHUB_PASSWORD) docker compose build
+
+# Usage: make release ENV=staging
+release:
+\t@echo "Pushing $(ENV) image: $(ORG_REGISTRY)/$(IMAGE_NAME):$(IMAGE_TAG)"
+\tORG_REGISTRY=$(ORG_REGISTRY) IMAGE_NAME=$(IMAGE_NAME) IMAGE_TAG=$(IMAGE_TAG) BUILD_ENV=$(ENV) docker compose push
+
+# Usage: make run ENV=staging
+run:
+\t@echo "Running $(ENV) image: $(ORG_REGISTRY)/$(IMAGE_NAME):$(IMAGE_TAG)"
+\tORG_REGISTRY=$(ORG_REGISTRY) IMAGE_NAME=$(IMAGE_NAME) IMAGE_TAG=$(IMAGE_TAG) BUILD_ENV=$(ENV) docker compose up
+
+# Helpers
+release-staging:
+\t$(MAKE) release ENV=staging
+
+release-production:
+\t$(MAKE) release ENV=production
+
+run-staging:
+\t$(MAKE) run ENV=staging
+
+run-production:
+\t$(MAKE) run ENV=production
+
+# Usage: make deploy ENV=staging
+deploy:
+\t@chmod +x deploy.sh
+\t@echo "Deploying $(ENV) image: $(ORG_REGISTRY)/$(IMAGE_NAME):$(IMAGE_TAG)"
+\t./deploy.sh $(IMAGE_NAME) $(ENV) $(ORG_REGISTRY)/$(IMAGE_NAME):$(IMAGE_TAG)
+
+deploy-staging:
+\t$(MAKE) deploy ENV=staging
+
+deploy-production:
+\t$(MAKE) deploy ENV=production
+"""
+
+
+def generate_makefile(cicd_data):
+    """Generate Makefile from cicd.json values without LLM call."""
+    try:
+        cfg = json.loads(cicd_data) if cicd_data.strip() else {}
+    except json.JSONDecodeError:
+        cfg = {}
+
+    image_name = cfg.get("IMAGE") or cfg.get("DEPLOYMENT") or "my-service"
+    project = cfg.get("PROJECT") or image_name
+    port = cfg.get("PORT") or "8080"
+    registry = cfg.get("REGISTRY") or "loyaltolpi"
+
+    return MAKEFILE_TEMPLATE.format(
+        image_name=image_name,
+        project=project,
+        port=port,
+        registry=registry,
+    )
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def main():
+    api_key = get_api_key()
+    model = get_model()
+    repo, refs, repo_url = get_repo_info()
+
+    github_path = os.path.join(os.getcwd(), "template", ".github", "workflows", "cicd.yaml")
+    dockerfile_path = "Dockerfile"
+    cicd_path = "cicd/cicd.json"
+
+    # --- Read inputs ---
+    if not os.path.exists(dockerfile_path):
+        print(f"Error: {dockerfile_path} tidak ditemukan.")
+        sys.exit(1)
+    with open(dockerfile_path) as f:
+        dockerfile_content = f.read()
+
+    cicd_data = "{}"
+    if os.path.exists(cicd_path):
+        with open(cicd_path) as f:
+            cicd_data = f.read()
+    github_content = ""
+    if os.path.exists(github_path):
+        with open(github_path) as f:
+            github_content = f.read()
+    else:
+        print(f"⚠️  GitHub workflow template tidak ditemukan di {github_path} — dilewati.")
+
+    print(f"🤖 Model: {model}")
+    print(f"📦 Repo: {repo} ({refs})")
+
+    # --- 1. Fix Dockerfile ---
+    print("⏳ [Dockerfile] ...", end=" ", flush=True)
+    hasil_dockerfile = call_llm(SYSTEM_DOCKERFILE, f"=== DOCKERFILE ASLI ===\n{dockerfile_content}",
+                                api_key, model, repo, refs)
+    print("✅")
+
+    # --- 2. Compose ---
+    print("⏳ [Compose] ...", end=" ", flush=True)
+    hasil_yaml = call_llm(SYSTEM_COMPOSE,
+                          f"=== DOCKERFILE ===\n{hasil_dockerfile}\n\n=== CICD.JSON ===\n{cicd_data}",
+                          api_key, model, repo, refs)
+    print("✅")
+
+    # --- 3. Makefile (direct, no LLM needed) ---
+    hasil_make = generate_makefile(cicd_data)
+    print("✅ [Makefile] Generated from cicd.json")
+
+    # --- 4. GitHub CI (via LLM jika template tersedia) ---
+    if github_content:
+        print("⏳ [GitHub CI] ...", end=" ", flush=True)
+        hasil_github = call_llm(SYSTEM_GITHUB_CI,
+                                f"=== CICD.JSON ===\n{cicd_data}\n\n=== GITHUB YAML ASLI ===\n{github_content}",
+                                api_key, model, repo, refs, max_tokens=8192)
+        print("✅")
+    else:
+        hasil_github = ""
+
+    # --- Write outputs ---
+    with open("Dockerfile", "w") as f:
+        f.write(hasil_dockerfile)
+
+    with open("compose.yaml", "w") as f:
+        f.write(hasil_yaml)
+
+    if hasil_make:
+        with open("Makefile", "w") as f:
+            f.write(hasil_make)
+
+    if hasil_github:
+        os.makedirs(".github/workflows", exist_ok=True)
+        with open(".github/workflows/cicd.yaml", "w") as f:
+            f.write(hasil_github)
+
+    print("🚀 Semua file CI/CD berhasil digenerate!")
+
+
+if __name__ == "__main__":
+    os.makedirs("cicd", exist_ok=True)
+    if not os.path.exists("cicd/cicd.json"):
+        with open("cicd/cicd.json", "w") as f:
+            f.write(json.dumps({
+                "IMAGE": "plus-be-merchantbalance-module",
+                "CLUSTER": "qoin",
+                "PROJECT": "qoinplus",
+                "DEPLOYMENT": "plus-be-merchantbalance-module",
+                "NODETYPE": "back",
+                "PORT": "2345",
+            }, indent=2))
+    if not os.path.exists("Dockerfile"):
+        with open("Dockerfile", "w") as f:
+            f.write("FROM alpine:latest\nCMD ['echo', 'hello']\n")
+
+    main()

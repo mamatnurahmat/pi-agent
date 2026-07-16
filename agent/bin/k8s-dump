@@ -1,0 +1,135 @@
+#!/bin/bash
+
+# Tentukan namespace yang akan diproses
+if [ -n "$1" ]; then
+  # Jika ada argumen 1, gunakan argumen tersebut sebagai namespace
+  NAMESPACES=("$1")
+else
+  # Jika tidak ada argumen, cari semua nama direktori di lokasi saat ini
+  NAMESPACES=()
+  for dir in */; do
+    # Pastikan itu benar-benar direktori dan hapus trailing slash (garis miring di akhir)
+    if [ -d "$dir" ]; then
+      dir_name="${dir%/}"
+      NAMESPACES+=("$dir_name")
+    fi
+  done
+  
+  if [ ${#NAMESPACES[@]} -eq 0 ]; then
+    echo "Tidak ditemukan direktori di lokasi ini untuk di-loop."
+    exit 1
+  fi
+  
+  echo "Tidak ada argumen spesifik. Akan memproses namespace berdasarkan folder:"
+  echo "${NAMESPACES[@]}"
+  echo ""
+fi
+
+# Daftar resource yang akan di-dump
+RESOURCES=("deployment" "services" "secret" "configmap" "hpa" "endpoints")
+
+for ns in "${NAMESPACES[@]}"; do
+  # Cek apakah namespace benar-benar eksis di cluster
+  if ! kubectl get namespace "$ns" >/dev/null 2>&1; then
+    echo "============================================================"
+    echo "SKIPPED: Namespace '$ns' tidak ditemukan di cluster!"
+    echo "============================================================"
+    echo ""
+    continue
+  fi
+
+  # Lokasi penyimpanan (folder bernama sama dengan namespace)
+  DEST_DIR="./$ns"
+
+  echo "============================================================"
+  echo "Mengekspor resource dari namespace: $ns"
+  echo "Resource: ${RESOURCES[*]}"
+  echo "Destinasi: $DEST_DIR"
+  echo "============================================================"
+
+  # Replace folder isinya jika sudah ada
+  if [ -d "$DEST_DIR" ]; then
+    echo "Folder $DEST_DIR sudah ada. Menghapus folder lama..."
+    rm -rf "$DEST_DIR"
+  fi
+
+  # Membuat direktori utama
+  mkdir -p "$DEST_DIR"
+
+  for res in "${RESOURCES[@]}"; do
+    echo "Mengekspor $res..."
+    
+    # Dapatkan daftar semua item untuk resource tersebut di namespace
+    items=$(kubectl get "$res" -n "$ns" --no-headers -o custom-columns=":metadata.name" 2>/dev/null)
+    
+    if [ -z "$items" ]; then
+      echo "  -> Tidak ada $res yang ditemukan."
+      continue
+    fi
+    
+    for item in $items; do
+      filename="${item}_${res}.yaml"
+
+      # Exclude helm release secrets
+      if [[ "$filename" == sh.helm.release.v1.*_secret.yaml ]]; then
+        continue
+      fi
+
+      # Exclude kube-root-ca.crt configmap
+      if [[ "$filename" == kube-root-ca.crt_configmap.yaml ]]; then
+        continue
+      fi
+
+      echo "  -> Menyimpan $filename"
+      
+      if yq --version 2>&1 | grep -q "mikefarah"; then
+        kubectl get "$res" "$item" -n "$ns" -o yaml | \
+          yq eval 'del(
+            .metadata.uid,
+            .metadata.resourceVersion,
+            .metadata.creationTimestamp,
+            .metadata.generation,
+            .metadata.annotations."kubectl.kubernetes.io/last-applied-configuration",
+            .metadata.annotations."deployment.kubernetes.io/revision",
+            .metadata.annotations."updatedAt",
+            .metadata.annotations."cattle.io/timestamp",
+            .metadata.managedFields,
+            .spec.template.metadata.annotations."kubectl.kubernetes.io/restartedAt",
+            .spec.template.metadata.annotations."updatedAt",
+            .spec.template.metadata.annotations."cattle.io/timestamp",
+            .spec.template.metadata.creationTimestamp,
+            .status,
+            .spec.clusterIP,
+            .spec.clusterIPs
+          )' > "$DEST_DIR/$filename"
+      else
+        # Fallback ke python yq (kislyuk/yq) menggunakan sintaks jq
+        kubectl get "$res" "$item" -n "$ns" -o json | \
+          yq -y 'del(
+            .metadata.uid,
+            .metadata.resourceVersion,
+            .metadata.creationTimestamp,
+            .metadata.generation,
+            .metadata.annotations."kubectl.kubernetes.io/last-applied-configuration",
+            .metadata.annotations."deployment.kubernetes.io/revision",
+            .metadata.annotations."updatedAt",
+            .metadata.annotations."cattle.io/timestamp",
+            .metadata.managedFields,
+            .spec.template.metadata.annotations."kubectl.kubernetes.io/restartedAt",
+            .spec.template.metadata.annotations."updatedAt",
+            .spec.template.metadata.annotations."cattle.io/timestamp",
+            .spec.template.metadata.creationTimestamp,
+            .status,
+            .spec.clusterIP,
+            .spec.clusterIPs
+          )' > "$DEST_DIR/$filename"
+      fi
+    done
+  done
+
+  echo "------------------------------------------------------------"
+  echo "Dump namespace $ns selesai!"
+  echo "Semua file berhasil disimpan di folder: $DEST_DIR"
+  echo "------------------------------------------------------------"
+  echo ""
+done

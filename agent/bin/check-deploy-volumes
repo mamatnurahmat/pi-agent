@@ -1,0 +1,286 @@
+#!/usr/bin/env python3
+"""
+check-deploy-volumes.py
+
+Cek semua deployment di namespace Kubernetes:
+  - Deployment yang volume/volumeMount-nya TIDAK ada secret file
+  - Hanya memiliki volume timezone (hostPath zoneinfo)
+  - Deployment tanpa volume sama sekali
+  - Deployment dengan volume lain (configMap, dll)
+
+Output: CSV report dengan klasifikasi dan detail.
+
+Penggunaan:
+    python3 check-deploy-volumes.py [--namespace <ns>] [--output <file.csv>]
+"""
+
+import json
+import csv
+import sys
+import subprocess
+import argparse
+from datetime import datetime
+from typing import Optional
+
+
+# ---------------------------------------------------------------------------
+# Konfigurasi default
+# ---------------------------------------------------------------------------
+DEFAULT_NAMESPACE = "production-saas"
+DEFAULT_OUTPUT = "deploy-volumes-report.csv"
+
+# Pola hostPath yang menandakan volume timezone
+TZ_ZONEINFO_PATH = "/zoneinfo/"
+
+
+# ---------------------------------------------------------------------------
+# Fungsi bantu
+# ---------------------------------------------------------------------------
+
+def run_kubectl(args: list) -> dict:
+    """Jalankan kubectl dan kembalikan JSON output."""
+    cmd = ["kubectl"] + args
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=30
+        )
+        if result.returncode != 0:
+            print(f"[!] kubectl error: {result.stderr.strip()}", file=sys.stderr)
+            return {}
+        return json.loads(result.stdout)
+    except FileNotFoundError:
+        print("[!] kubectl tidak ditemukan. Pastikan kubectl sudah terinstall dan ada di PATH.", file=sys.stderr)
+        sys.exit(1)
+    except subprocess.TimeoutExpired:
+        print("[!] kubectl timeout setelah 30 detik.", file=sys.stderr)
+        return {}
+    except json.JSONDecodeError as e:
+        print(f"[!] Gagal parse JSON: {e}", file=sys.stderr)
+        return {}
+
+
+def get_deployments(namespace: str) -> list:
+    """Ambil semua deployment dalam namespace."""
+    data = run_kubectl(["get", "deployments", "-n", namespace, "-o", "json"])
+    return data.get("items", [])
+
+
+def classify_deployment(deploy: dict) -> dict:
+    """
+    Klasifikasikan deployment berdasarkan volume/volumeMount.
+
+    Return dict:
+        name, namespace, has_volume, has_secret, has_tz, category,
+        volumes_detail, mounts_detail, secret_names, tz_paths
+    """
+    name = deploy["metadata"]["name"]
+    namespace = deploy["metadata"]["namespace"]
+    spec = deploy["spec"]["template"]["spec"]
+    volumes = spec.get("volumes", [])
+    containers = spec.get("containers", [])
+
+    # --- Index volume berdasarkan nama → type & detail ---
+    vol_map = {}       # name -> type (hostPath, secret, configMap, etc.)
+    vol_detail = {}    # name -> detail info
+
+    for v in volumes:
+        vname = v["name"]
+        # Tentukan tipe (selain 'name')
+        vtype = [k for k in v if k != "name"][0] if len(v) > 1 else "unknown"
+        vol_map[vname] = vtype
+
+        if vtype == "secret":
+            vol_detail[vname] = {
+                "type": "secret",
+                "secretName": v.get("secret", {}).get("secretName", "N/A"),
+            }
+        elif vtype == "hostPath":
+            hp_path = v.get("hostPath", {}).get("path", "N/A")
+            vol_detail[vname] = {
+                "type": "hostPath",
+                "hostPath": hp_path,
+            }
+        elif vtype == "configMap":
+            vol_detail[vname] = {
+                "type": "configMap",
+                "configMapName": v.get("configMap", {}).get("name", "N/A"),
+            }
+        else:
+            vol_detail[vname] = {"type": vtype}
+
+    # --- Analisis volumeMount dari semua container ---
+    has_volume = len(volumes) > 0
+    has_secret = False
+    has_tz = False
+    secret_names = []
+    tz_paths = []
+    mounts_detail = []
+    volumes_detail = []
+
+    for vname, vtype in vol_map.items():
+        vd = vol_detail.get(vname, {})
+        if vtype == "secret":
+            has_secret = True
+            sn = vd.get("secretName", "N/A")
+            if sn not in secret_names:
+                secret_names.append(sn)
+            volumes_detail.append(f"secret:{sn}")
+        elif vtype == "hostPath":
+            hp = vd.get("hostPath", "")
+            if TZ_ZONEINFO_PATH in hp:
+                has_tz = True
+                tz_paths.append(hp)
+                volumes_detail.append(f"hostPath(TZ):{hp}")
+            else:
+                volumes_detail.append(f"hostPath:{hp}")
+        else:
+            volumes_detail.append(f"{vtype}:{vd.get(vtype, vd.get('configMapName', ''))}")
+
+    for c in containers:
+        cname = c["name"]
+        for m in c.get("volumeMounts", []):
+            mvname = m["name"]
+            mount_path = m.get("mountPath", "N/A")
+            vtype = vol_map.get(mvname, "unknown")
+            mounts_detail.append(f"{cname}:{mvname}({vtype})→{mount_path}")
+
+    # --- Klasifikasi ---
+    if not has_volume:
+        category = "NO_VOLUMES"
+    elif has_secret:
+        category = "HAS_SECRET"
+    elif has_tz:
+        category = "TZ_ONLY"  # target: hanya timezone, tidak ada secret
+    else:
+        category = "OTHER_VOLUME"  # punya volume, bukan secret & bukan tz
+
+    return {
+        "deployment": name,
+        "namespace": namespace,
+        "has_volume": has_volume,
+        "has_secret": has_secret,
+        "has_tz": has_tz,
+        "category": category,
+        "volumes_count": len(volumes),
+        "volumes_detail": " | ".join(volumes_detail) if volumes_detail else "-",
+        "mounts_detail": " | ".join(mounts_detail) if mounts_detail else "-",
+        "secret_names": ", ".join(secret_names) if secret_names else "-",
+        "tz_hostpaths": ", ".join(tz_paths) if tz_paths else "-",
+    }
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Cek deployment: volume/volumeMount tanpa secret, hanya timezone."
+    )
+    parser.add_argument(
+        "-n", "--namespace",
+        default=DEFAULT_NAMESPACE,
+        help=f"Namespace Kubernetes (default: {DEFAULT_NAMESPACE})",
+    )
+    parser.add_argument(
+        "-o", "--output",
+        default=DEFAULT_OUTPUT,
+        help=f"Output CSV file (default: {DEFAULT_OUTPUT})",
+    )
+    parser.add_argument(
+        "--filter",
+        choices=["all", "tz_only", "no_volumes", "has_secret", "other"],
+        default="all",
+        help="Filter kategori untuk report (default: all)",
+    )
+    args = parser.parse_args()
+
+    print(f"[*] Namespace     : {args.namespace}")
+    print(f"[*] Output        : {args.output}")
+    print(f"[*] Filter        : {args.filter}")
+    print("-" * 60)
+
+    # Ambil semua deployment
+    deployments = get_deployments(args.namespace)
+    if not deployments:
+        print(f"[!] Tidak ada deployment di namespace '{args.namespace}'.")
+        sys.exit(1)
+
+    print(f"[*] Deployment ditemukan: {len(deployments)}")
+
+    # Klasifikasi semua deployment
+    results = []
+    for d in deployments:
+        r = classify_deployment(d)
+        results.append(r)
+
+    # Filter
+    if args.filter != "all":
+        filter_map = {
+            "tz_only": "TZ_ONLY",
+            "no_volumes": "NO_VOLUMES",
+            "has_secret": "HAS_SECRET",
+            "other": "OTHER_VOLUME",
+        }
+        results = [r for r in results if r["category"] == filter_map[args.filter]]
+
+    # Urutkan: TZ_ONLY dulu (yang perlu perhatian), lalu lainnya
+    cat_order = {"TZ_ONLY": 0, "NO_VOLUMES": 1, "OTHER_VOLUME": 2, "HAS_SECRET": 3}
+    results.sort(key=lambda r: (cat_order.get(r["category"], 99), r["deployment"]))
+
+    # --- Hitung statistik ---
+    stats = {"TZ_ONLY": 0, "HAS_SECRET": 0, "NO_VOLUMES": 0, "OTHER_VOLUME": 0}
+    for r in results:
+        stats[r["category"]] += 1
+
+    # --- Tulis CSV ---
+    fieldnames = [
+        "deployment",
+        "namespace",
+        "category",
+        "has_volume",
+        "has_secret",
+        "has_tz",
+        "volumes_count",
+        "volumes_detail",
+        "mounts_detail",
+        "secret_names",
+        "tz_hostpaths",
+    ]
+
+    with open(args.output, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(results)
+
+    # --- Print summary ---
+    print()
+    print("=" * 70)
+    print("  RINGKASAN")
+    print("=" * 70)
+    print(f"  🔴 TZ_ONLY (tanpa secret)  : {stats['TZ_ONLY']:>3}  ← perlu ditambahkan secret")
+    print(f"  🟢 HAS_SECRET              : {stats['HAS_SECRET']:>3}")
+    print(f"  ⚪ NO_VOLUMES              : {stats['NO_VOLUMES']:>3}")
+    print(f"  🟡 OTHER_VOLUME (non-tz)   : {stats['OTHER_VOLUME']:>3}")
+    print(f"  ---------------------------")
+    print(f"  TOTAL                      : {sum(stats.values()):>3}")
+    print()
+
+    # Print TZ_ONLY detail
+    tz_only_list = [r for r in results if r["category"] == "TZ_ONLY"]
+    if tz_only_list:
+        print("  Deployment TANPA secret (hanya timezone):")
+        print("  ─────────────────────────────────────────")
+        for r in tz_only_list:
+            print(f"  • {r['deployment']}")
+            print(f"    Mounts: {r['mounts_detail']}")
+            print(f"    Volumes: {r['volumes_detail']}")
+        print()
+
+    print(f"[✓] Report CSV disimpan ke: {args.output}")
+    print(f"[*] Tanggal: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print("=" * 70)
+
+
+if __name__ == "__main__":
+    main()

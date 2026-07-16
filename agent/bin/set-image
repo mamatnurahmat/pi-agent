@@ -1,0 +1,32 @@
+#!/bin/bash
+set -euo pipefail
+
+ns="$1"
+deploy="$2"
+raw="$3"
+container="${4:-}"  # ponytail: optional 4th arg for multi-container deploys
+
+# ponytail: if arg3 is plain tag (no slash), build image from registry+deploy
+if [[ "$raw" != */* ]]; then
+  image="loyaltolpi/${deploy}:${raw}"
+else
+  image="$raw"
+fi
+
+# capture previous image before change
+prev=$(kubectl get deployment "$deploy" -n "$ns" -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || echo "<unknown>")
+echo "🔄 $prev → $image"
+
+# ponytail: skip registry verification. CI/CD ensures image exists before deploy
+
+# apply
+if [ -n "$container" ]; then
+  kubectl set image "deployment/$deploy" "$container=$image" -n "$ns"
+else
+  # ponytail: *= updates all containers. no need to know container name
+  kubectl set image "deployment/$deploy" "*=$image" -n "$ns"
+fi
+
+# wait until rollout fully succeeds (no timeout)
+echo "⏳ waiting for rollout..."
+kubectl rollout status "deployment/$deploy" -n "$ns" --watch

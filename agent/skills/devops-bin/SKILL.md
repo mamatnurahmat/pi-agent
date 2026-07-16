@@ -21,8 +21,11 @@ You have access to several custom bash scripts located in `~/.pi/agent/bin/`. Yo
 *   `k8s-logs <pod_name> <namespace> [tail_lines]` - Gets logs for a pod.
 *   `set-image <deployment> <namespace> <image_tag>` - Updates the image of a deployment.
 *   `get-file-secret <namespace>` - Generates kubernetes secret yaml based on config files.
+*   `patch-dotenv-go <namespace> <deployment> [--apply]` - Patch deployment dengan volumeMount (tz-config, file-config-volume) untuk file .env saja. Juga export YAML ke `{deploy}_deployment.yaml`.
+*   `patch-file-config-deploy <namespace> <deployment> [--apply]` - Seperti patch-dotenv-go, tapi auto-detect **semua file** di dalam secret `file-config-{deploy}` (.env, .app.config, dll) dan membuat volumeMount untuk tiap file. Lebih fleksibel untuk multi-file config.
 *   `match-secret <file>` - Matches secrets/envs.
 *   `is-match <args>` / `is-match-ns <args>` - Utility scripts for matching deployments with repos.
+*   `check-deploy-volumes [-n <namespace>] [-o <output.csv>] [--filter tz_only|no_volumes|has_secret|other]` - Python script: cek semua deployment, deteksi yang volume/volumeMount-nya TIDAK ada secret file dan hanya timezone. Output CSV report dengan klasifikasi TZ_ONLY / HAS_SECRET / NO_VOLUMES / OTHER_VOLUME.
 
 ### CI/CD & DevOps
 *   `cicd-init` - Initializes CI/CD templates.

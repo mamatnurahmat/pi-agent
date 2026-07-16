@@ -1,0 +1,108 @@
+#!/bin/bash
+
+# apply-file-config
+# Apply semua file file-config-*_secret.yaml di direktori saat ini ke Kubernetes.
+#
+# Usage:
+#   apply-file-config <namespace>
+#
+# Contoh:
+#   apply-file-config production-saas
+#   apply-file-config production-qoinplus
+
+NAMESPACE="$1"
+
+if [ -z "$NAMESPACE" ]; then
+  echo "Usage: $(basename "$0") <namespace>"
+  echo ""
+  echo "Contoh:"
+  echo "  $(basename "$0") production-saas"
+  echo "  $(basename "$0") production-qoinplus"
+  echo ""
+  echo "Script akan:"
+  echo "  - Mencari semua file file-config-* di \$PWD"
+  echo "  - Apply satu per satu dengan kubectl apply -f <file> -n <namespace>"
+  exit 1
+fi
+
+# ------------------------------------------------------------------
+# 1. Cek namespace
+# ------------------------------------------------------------------
+if ! kubectl get namespace "$NAMESPACE" >/dev/null 2>&1; then
+  echo "[✗] GAGAL: Namespace '$NAMESPACE' tidak ditemukan di cluster."
+  echo ""
+  echo "Namespace yang tersedia di cluster saat ini:"
+  kubectl get ns --no-headers -o custom-columns=":metadata.name" 2>/dev/null | grep -v "^kube-\|^cattle-\|^fleet-" | sort
+  exit 1
+fi
+
+echo "✓ Namespace     : ${NAMESPACE}"
+
+# ------------------------------------------------------------------
+# 2. Cari file file-config-* di PWD
+# ------------------------------------------------------------------
+shopt -s nullglob
+FILES=(file-config-*)
+shopt -u nullglob
+
+if [ ${#FILES[@]} -eq 0 ]; then
+  echo "[✗] GAGAL: Tidak ada file file-config-* ditemukan di ${PWD}"
+  exit 1
+fi
+
+echo "✓ Total file    : ${#FILES[@]}"
+echo ""
+
+# ------------------------------------------------------------------
+# 3. Apply setiap file
+# ------------------------------------------------------------------
+OK=0
+FAIL=0
+SKIP=0
+
+for FILE in "${FILES[@]}"; do
+  # Skip selain file biasa
+  if [ ! -f "$FILE" ]; then
+    continue
+  fi
+
+  # Ambil secret name dari nama file (hanya untuk log)
+  # file-config-saas-be-access-manager_secret.yaml → file-config-saas-be-access-manager
+  SECRET_NAME="${FILE%_secret.yaml}"
+
+  # Cek apakah file adalah YAML
+  if [[ ! "$FILE" =~ \.(yaml|yml)$ ]]; then
+    echo "[✗] SKIP ${FILE}  (bukan file YAML)"
+    SKIP=$((SKIP + 1))
+    continue
+  fi
+
+  echo -n "[*] ${FILE}  ... "
+
+  # Apply
+  RESULT=$(kubectl apply -f "$FILE" -n "$NAMESPACE" 2>&1)
+  EXIT_CODE=$?
+
+  if [ $EXIT_CODE -eq 0 ]; then
+    echo "✓ ${RESULT}"
+    OK=$((OK + 1))
+  else
+    echo "✗ GAGAL"
+    echo "    ${RESULT}"
+    FAIL=$((FAIL + 1))
+  fi
+done
+
+# ------------------------------------------------------------------
+# 4. Ringkasan
+# ------------------------------------------------------------------
+echo ""
+echo "----- Ringkasan -----"
+echo "  Namespace : ${NAMESPACE}"
+echo "  Total     : ${#FILES[@]} file"
+echo "  Berhasil  : ${OK}"
+echo "  Gagal     : ${FAIL}"
+if [ $SKIP -gt 0 ]; then
+  echo "  Skip      : ${SKIP}"
+fi
+echo "---------------------"

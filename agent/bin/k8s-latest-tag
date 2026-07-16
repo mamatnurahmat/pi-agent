@@ -1,0 +1,33 @@
+#!/bin/bash
+
+# Script to get the image tag used by a deployment in Kubernetes
+# Arguments:
+# $1: namespace
+# $2: deployment name
+
+NAMESPACE="$1"
+DEPLOYMENT="$2"
+
+if [ -z "$NAMESPACE" ] || [ -z "$DEPLOYMENT" ]; then
+  echo "Usage: $(basename "$0") <namespace> <deployment>"
+  echo "Example: $(basename "$0") production-saas saas-be-profile-manager"
+  exit 1
+fi
+
+# Get the full image string of the first container in the deployment
+IMAGE=$(kubectl get deployment "$DEPLOYMENT" -n "$NAMESPACE" -o jsonpath="{.spec.template.spec.containers[0].image}" 2>/dev/null)
+
+if [ -z "$IMAGE" ]; then
+  echo "Error: Deployment '$DEPLOYMENT' not found in namespace '$NAMESPACE' or has no containers."
+  exit 1
+fi
+
+# Extract the tag (everything after the last ':')
+TAG=${IMAGE##*:}
+
+if [[ "$TAG" == "$IMAGE" ]]; then
+  # If there's no colon in the image name, the tag is implicitly 'latest'
+  echo "latest"
+else
+  echo "$TAG"
+fi

@@ -1,0 +1,23 @@
+#!/bin/bash
+
+# Script to get a file from GitHub using gh cli
+# Organization is hardcoded to Qoin-Digital-Indonesia
+# Arguments:
+# $1: repo name
+# $2: refs (branch or tag)
+# $3: file path
+
+ORG="Qoin-Digital-Indonesia"
+REPO="$1"
+REF="$2"
+FILE_PATH="$3"
+
+if [ -z "$REPO" ] || [ -z "$REF" ] || [ -z "$FILE_PATH" ]; then
+  echo "Usage: $(basename "$0") <repo> <branch/tag> <file_path>"
+  echo "Example: $(basename "$0") my-repo main src/main.go"
+  exit 1
+fi
+
+# Use GitHub API to fetch raw file content
+gh api -H "Accept: application/vnd.github.v3.raw" \
+  "/repos/${ORG}/${REPO}/contents/${FILE_PATH}?ref=${REF}"

@@ -1,0 +1,61 @@
+#!/bin/bash
+# Cek match semua deployment di namespace terhadap latest tag GitHub
+# Output: <namespace>.csv
+# Usage: is-match-ns <namespace> [org]
+#   org: default = Qoin-Digital-Indonesia
+
+NS="$1"
+ORG="${2:-Qoin-Digital-Indonesia}"
+
+if [ -z "$NS" ]; then
+  echo "Usage: $(basename "$0") <namespace> [org]"
+  echo ""
+  echo "Cek match semua deployment di namespace terhadap latest tag GitHub"
+  echo "Output: <namespace>.csv"
+  echo ""
+  echo "Contoh:"
+  echo "  is-match-ns production-payout"
+  echo "  is-match-ns production-saas MyOrg"
+  exit 1
+fi
+
+CSV="${NS}.csv"
+
+echo "deploy,k8s_tag,github_tag,status" > "$CSV"
+
+echo "🔍 Scanning namespace: ${NS}"
+echo ""
+
+total=0
+kubectl get deployment -n "$NS" --no-headers -o name 2>/dev/null | while read d; do
+  DEPLOY=$(echo "$d" | sed 's|deployment.apps/||')
+  REPO="$DEPLOY"
+  total=$((total + 1))
+  printf "  [%2d] %-45s " "$total" "$DEPLOY"
+
+  GH_TAG=$(gh api "/repos/${ORG}/${REPO}/tags" --jq '.[].name' 2>/dev/null | grep '^v' | sort -V | tail -n 1)
+
+  K8S_IMAGE=$(kubectl get deployment "$DEPLOY" -n "$NS" -o jsonpath="{.spec.template.spec.containers[0].image}" 2>/dev/null)
+  if [ -z "$K8S_IMAGE" ]; then
+    echo "NO_IMAGE"
+    echo "${DEPLOY},-,${GH_TAG:-?},NO_IMAGE" >> "$CSV"
+    continue
+  fi
+  K8S_TAG=${K8S_IMAGE##*:}
+
+  if [ -z "$GH_TAG" ]; then
+    echo "NO_REPO   (k8s: $K8S_TAG)"
+    echo "${DEPLOY},${K8S_TAG},-,NO_REPO" >> "$CSV"
+    continue
+  fi
+
+  if [ "$GH_TAG" = "$K8S_TAG" ]; then
+    echo "✅ MATCH    (${GH_TAG})"
+    echo "${DEPLOY},${K8S_TAG},${GH_TAG},MATCH" >> "$CSV"
+  else
+    echo "❌ NOT_MATCH (k8s: ${K8S_TAG}, gh: ${GH_TAG})"
+    echo "${DEPLOY},${K8S_TAG},${GH_TAG},NOT_MATCH" >> "$CSV"
+  fi
+done
+
+echo "✅ ${CSV} saved ($(wc -l < "$CSV") rows)"

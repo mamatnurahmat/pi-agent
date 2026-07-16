@@ -1,0 +1,171 @@
+#!/usr/bin/env python3
+"""Tampilkan cost realtime dari session pi."""
+import json
+import os
+import sys
+import glob
+import time
+import urllib.request
+import urllib.error
+
+SESSION_DIR = os.environ.get(
+    "PI_CODING_AGENT_SESSION_DIR",
+    os.path.expanduser("~/.pi/agent/sessions")
+)
+
+def cost_from_msg(msg):
+    u = msg.get("usage", {})
+    c = u.get("cost", {})
+    if isinstance(c, dict):
+        total = c.get("total", 0)
+    else:
+        total = float(c or 0)
+    return {
+        "total": total,
+        "input": u.get("input", 0),
+        "output": u.get("output", 0),
+        "cache": u.get("cacheRead", 0),
+    }
+
+def parse_session(path):
+    costs = []
+    try:
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    d = json.loads(line)
+                    if d.get("type") == "message":
+                        m = d.get("message", {})
+                        c = cost_from_msg(m)
+                        if c["total"] > 0:
+                            costs.append(c)
+                except json.JSONDecodeError:
+                    pass
+    except (FileNotFoundError, PermissionError):
+        pass
+    return costs
+
+IDR_RATE_CACHE = None
+IDR_RATE_FILE = os.path.expanduser("~/.cache/pi-cost-idr")
+
+def get_idr_rate():
+    global IDR_RATE_CACHE
+    now = time.time()
+    if IDR_RATE_CACHE and now - IDR_RATE_CACHE["time"] < 21600:
+        return IDR_RATE_CACHE["rate"]
+    if os.path.exists(IDR_RATE_FILE):
+        try:
+            with open(IDR_RATE_FILE) as f:
+                data = json.load(f)
+            if now - data["time"] < 21600:
+                IDR_RATE_CACHE = data
+                return data["rate"]
+        except (json.JSONDecodeError, KeyError):
+            pass
+    try:
+        url = "https://open.er-api.com/v6/latest/USD"
+        with urllib.request.urlopen(url, timeout=5) as resp:
+            data = json.loads(resp.read())
+        rate = data["rates"]["IDR"]
+        cache = {"rate": rate, "time": now}
+        IDR_RATE_CACHE = cache
+        os.makedirs(os.path.dirname(IDR_RATE_FILE), exist_ok=True)
+        with open(IDR_RATE_FILE, "w") as f:
+            json.dump(cache, f)
+        return rate
+    except (urllib.error.URLError, KeyError, json.JSONDecodeError):
+        return 16300
+
+def fmt_idr(usd):
+    rate = get_idr_rate()
+    idr = usd * rate
+    if idr >= 1000:
+        return f"Rp{idr:,.0f}"
+    return f"Rp{idr:.0f}"
+
+def fmt_tokens(n):
+    if n >= 1_000_000:
+        return f"{n/1_000_000:.1f}M"
+    elif n >= 1_000:
+        return f"{n/1_000:.1f}k"
+    return str(n)
+
+def show_cost(name, costs):
+    if not costs:
+        return
+    total = sum(c["total"] for c in costs)
+    t_in = sum(c["input"] for c in costs)
+    t_out = sum(c["output"] for c in costs)
+    t_cache = sum(c["cache"] for c in costs)
+    name_short = os.path.basename(name).replace(".jsonl", "")[:35]
+    print(f"  {name_short:35s}  {len(costs):3d} msgs  "
+          f"{fmt_tokens(t_in):>8s} in  {fmt_tokens(t_out):>8s} out  "
+          f"{fmt_tokens(t_cache):>8s} cache  ${total:.6f}  {fmt_idr(total)}")
+
+def latest_session():
+    files = sorted(glob.glob(f"{SESSION_DIR}/**/*.jsonl", recursive=True),
+                   key=os.path.getmtime, reverse=True)
+    return files[0] if files else None
+
+def main():
+    watch = "-w" in sys.argv or "--watch" in sys.argv
+    days = 0
+    for i, a in enumerate(sys.argv):
+        if a in ("-d", "--days") and i + 1 < len(sys.argv):
+            days = int(sys.argv[i + 1])
+    all_sessions = "-a" in sys.argv or "--all" in sys.argv or days > 0
+
+    if watch:
+        while True:
+            os.system("clear" if os.name == "posix" else "cls")
+            print(f"=== Cost Session Pi (realtime) === {time.strftime('%H:%M:%S')}")
+            print()
+            latest = latest_session()
+            if latest:
+                show_cost(os.path.basename(latest), parse_session(latest))
+            print()
+            print("--- hari ini ---")
+            today = time.strftime("%Y-%m-%d")
+            for f in sorted(glob.glob(f"{SESSION_DIR}/**/*.jsonl", recursive=True),
+                            key=os.path.getmtime):
+                if today in f:
+                    show_cost(f, parse_session(f))
+            time.sleep(3)
+    elif all_sessions:
+        cutoff = time.time() - days * 86400 if days > 0 else 0
+        print(f"\n{' Session':40s} {'Msgs':>5s}  {'Input':>8s}  {'Output':>8s}  {'Cache':>8s}  {'Cost':>10s}  {'IDR':>14s}")
+        print("-" * 90)
+        grand = {"total": 0, "input": 0, "output": 0, "cache": 0}
+        for f in sorted(glob.glob(f"{SESSION_DIR}/**/*.jsonl", recursive=True),
+                        key=os.path.getmtime, reverse=True):
+            if cutoff and os.path.getmtime(f) < cutoff:
+                continue
+            costs = parse_session(f)
+            show_cost(f, costs)
+            for c in costs:
+                grand["total"] += c["total"]
+                grand["input"] += c["input"]
+                grand["output"] += c["output"]
+                grand["cache"] += c["cache"]
+        print("-" * 90)
+        print(f"{' GRAND TOTAL':40s}  "
+              f"{fmt_tokens(grand['input']):>8s} in  "
+              f"{fmt_tokens(grand['output']):>8s} out  "
+              f"{fmt_tokens(grand['cache']):>8s} cache  "
+              f"${grand['total']:.6f}")
+        print()
+    else:
+        latest = latest_session()
+        if not latest:
+            print("Belum ada session.")
+            sys.exit(1)
+        print(f"\n=== Session Terakhir: {os.path.basename(latest)} ===")
+        print()
+        show_cost(latest, parse_session(latest))
+        print()
+
+if __name__ == "__main__":
+    main()

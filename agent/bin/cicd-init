@@ -1,0 +1,35 @@
+#!/bin/bash
+
+# Pastikan API_KEY sudah di-set
+if [ -z "$API_KEY" ]; then
+    echo "❌ Error: API_KEY belum di-set."
+    echo "Gunakan perintah berikut sebelum menjalankan script:"
+    echo "export API_KEY=\"sk-or-v1-...\""
+    exit 1
+fi
+
+# Deteksi arsitektur mesin (platform)
+ARCH=$(uname -m)
+DOCKER_PLATFORM_FLAG=""
+
+if [ "$ARCH" = "arm64" ] || [ "$ARCH" = "aarch64" ]; then
+    echo "⚙️  Terdeteksi mesin ARM ($ARCH). Menggunakan mode emulasi linux/amd64..."
+    DOCKER_PLATFORM_FLAG="--platform linux/amd64"
+elif [ "$ARCH" = "x86_64" ] || [ "$ARCH" = "amd64" ]; then
+    echo "⚙️  Terdeteksi mesin AMD/Intel ($ARCH)."
+else
+    echo "⚙️  Terdeteksi mesin $ARCH."
+fi
+
+CURRENT_MODEL=${MODEL:-"deepseek/deepseek-v4-flash"}
+echo "🤖 Model AI yang digunakan: $CURRENT_MODEL"
+echo "💡 (Opsional) Untuk mengganti model, gunakan perintah: export MODEL=\"qwen/qwen3.7-max\" sebelum menjalankan script."
+echo ""
+
+# Mencoba mendapatkan informasi git secara otomatis
+GIT_REPO=$(basename -s .git "$(git config --get remote.origin.url 2>/dev/null)" 2>/dev/null || basename "$(pwd)")
+GIT_REF=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "branch_name / tag")
+GIT_URL=$(git config --get remote.origin.url 2>/dev/null || echo "https://github.com/newrahmat/cicd-init")
+
+echo "🚀 Menjalankan inisialisasi CI/CD..."
+docker run --rm -i $DOCKER_PLATFORM_FLAG -e API_KEY="$API_KEY" -e MODEL="$MODEL" -e GIT_REPO="$GIT_REPO" -e GIT_REF="$GIT_REF" -e GIT_URL="$GIT_URL" -v "$(pwd):/app" newrahmat/cicd-init

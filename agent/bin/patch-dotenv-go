@@ -1,0 +1,210 @@
+#!/bin/bash
+set -euo pipefail
+
+# ============================================================
+# patch-dotenv-go — Patch deployment dengan volume & volumeMount
+# untuk file konfigurasi (.env) dan timezone Asia/Jakarta
+#
+# Args:
+#   $1: namespace
+#   $2: deployment name
+#   $3: (optional) --apply
+#        Jika ada, apply patch ke cluster + rollout.
+#        Default: hanya generate YAML ({deploy}_deployment.yaml).
+#
+# Output:
+#   - (default) Generate YAML hasil patch, tanpa perubahan cluster
+#   - (--apply) Apply ke cluster + rollout + export YAML
+#   - File YAML: {deploy}_deployment.yaml
+#
+# Contoh:
+#   patch-dotenv-go production-saas saas-be-clientapi-module        # generate YAML saja
+#   patch-dotenv-go production-saas saas-be-clientapi-module --apply # apply ke cluster
+# ============================================================
+
+if [ "$#" -lt 2 ]; then
+  echo "Usage: $(basename "$0") <namespace> <deployment> [--apply]"
+  echo ""
+  echo "Contoh:"
+  echo "  $(basename "$0") production-saas saas-be-clientapi-module       # generate YAML saja"
+  echo "  $(basename "$0") production-saas saas-be-clientapi-module --apply # apply ke cluster"
+  exit 1
+fi
+
+ns="$1"
+deploy="$2"
+secret_name="file-config-${deploy}"
+output_file="${deploy}_deployment.yaml"
+
+# Cek flag --apply
+APPLY=false
+if [ "${3:-}" = "--apply" ]; then
+  APPLY=true
+fi
+
+# ============================================================
+# 1. Validasi deployment & secret exist
+# ============================================================
+if ! kubectl get deployment "$deploy" -n "$ns" &>/dev/null; then
+  echo "❌ Error: Deployment '${deploy}' tidak ditemukan di namespace '${ns}'."
+  exit 1
+fi
+echo "✓ Deployment '${deploy}' ditemukan di namespace '${ns}'"
+
+if ! kubectl get secret "$secret_name" -n "$ns" &>/dev/null; then
+  echo "⚠️  Warning: Secret '${secret_name}' belum ada. Buat dulu dengan generate-secret-file-config."
+  echo "   Melanjutkan patch volume saja (tanpa secret, container akan error)."
+fi
+
+# ============================================================
+# 2. Cek volumeMounts & volumes yang sudah ada
+# ============================================================
+echo "🔍 Memeriksa volume & volumeMount yang sudah ada..."
+
+# VolumeMount yang sudah ada
+existing_mounts=$(kubectl get deployment "$deploy" -n "$ns" -o json 2>/dev/null | \
+  jq '[.spec.template.spec.containers[0].volumeMounts[]? // empty | .name]' 2>/dev/null || echo "[]")
+
+# Volumes yang sudah ada
+existing_volumes=$(kubectl get deployment "$deploy" -n "$ns" -o json 2>/dev/null | \
+  jq '[.spec.template.spec.volumes[]? // empty | .name]' 2>/dev/null || echo "[]")
+
+# ============================================================
+# 3. Bangun JSON patch
+# ============================================================
+PATCH_OPS=()
+
+# --- volumeMounts ---
+# tz-config
+has_tz_mount=$(echo "$existing_mounts" | jq 'contains(["tz-config"])')
+if [ "$has_tz_mount" = "true" ]; then
+  echo "  ✓ volumeMount 'tz-config' sudah ada — skip"
+else
+  echo "  + Menambahkan volumeMount 'tz-config'"
+  PATCH_OPS+=("{\"op\": \"add\", \"path\": \"/spec/template/spec/containers/0/volumeMounts/-\", \"value\": {\"mountPath\": \"/etc/localtime\", \"name\": \"tz-config\"}}")
+fi
+
+# file-config-volume
+has_file_mount=$(echo "$existing_mounts" | jq 'contains(["file-config-volume"])')
+if [ "$has_file_mount" = "true" ]; then
+  echo "  ✓ volumeMount 'file-config-volume' sudah ada — skip"
+else
+  echo "  + Menambahkan volumeMount 'file-config-volume'"
+  PATCH_OPS+=("{\"op\": \"add\", \"path\": \"/spec/template/spec/containers/0/volumeMounts/-\", \"value\": {\"mountPath\": \"/.env\", \"name\": \"file-config-volume\", \"subPath\": \".env\"}}")
+fi
+
+# --- volumes ---
+# tz-config (hostPath)
+has_tz_vol=$(echo "$existing_volumes" | jq 'contains(["tz-config"])')
+if [ "$has_tz_vol" = "true" ]; then
+  echo "  ✓ volume 'tz-config' sudah ada — skip"
+else
+  echo "  + Menambahkan volume 'tz-config' (hostPath Asia/Jakarta)"
+  PATCH_OPS+=("{\"op\": \"add\", \"path\": \"/spec/template/spec/volumes/-\", \"value\": {\"hostPath\": {\"path\": \"/usr/share/zoneinfo/Asia/Jakarta\", \"type\": \"\"}, \"name\": \"tz-config\"}}")
+fi
+
+# file-config-volume (secret)
+has_file_vol=$(echo "$existing_volumes" | jq 'contains(["file-config-volume"])')
+if [ "$has_file_vol" = "true" ]; then
+  echo "  ✓ volume 'file-config-volume' sudah ada — skip"
+else
+  echo "  + Menambahkan volume 'file-config-volume' (secret: ${secret_name})"
+  PATCH_OPS+=("{\"op\": \"add\", \"path\": \"/spec/template/spec/volumes/-\", \"value\": {\"name\": \"file-config-volume\", \"secret\": {\"defaultMode\": 420, \"secretName\": \"${secret_name}\"}}}")
+fi
+
+# ============================================================
+# 4. Generate / Apply patch
+# ============================================================
+if [ ${#PATCH_OPS[@]} -eq 0 ]; then
+  echo ""
+  echo "✅ Semua volume & volumeMount sudah terpasang. Tidak ada perubahan."
+  echo ""
+  echo "Ringkasan:"
+  echo "  volumeMounts:"
+  echo "    - tz-config → /etc/localtime"
+  echo "    - file-config-volume → /.env (subPath: .env)"
+  echo "  volumes:"
+  echo "    - tz-config → hostPath /usr/share/zoneinfo/Asia/Jakarta"
+  echo "    - file-config-volume → secret ${secret_name}"
+
+  # Tetap export YAML existing
+  echo ""
+  echo "📄 Mengekspor deployment YAML ke ${output_file}..."
+  kubectl get deployment "$deploy" -n "$ns" -o yaml \
+    | sed '/^status:/,$ d' \
+    > "$output_file"
+  echo "  File: $(pwd)/${output_file}"
+  echo "  Size: $(wc -c < "$output_file") bytes"
+
+  echo ""
+  echo "===== Selesai ====="
+  exit 0
+fi
+
+# Gabungkan patch ops jadi array JSON
+PATCH_JSON=$(printf '%s\n' "${PATCH_OPS[@]}" | jq -s -c '.')
+
+echo ""
+echo "📝 Patch JSON yang akan diterapkan:"
+echo "$PATCH_JSON" | jq '.'
+echo ""
+
+if [ "$APPLY" = "true" ]; then
+  # ============================================================
+  # Mode: APPLY ke cluster
+  # ============================================================
+  echo "📝 Menerapkan patch ke deployment '${deploy}'..."
+  kubectl patch deployment "$deploy" -n "$ns" --type json -p "$PATCH_JSON"
+
+  # Rollout status
+  echo ""
+  echo "⏳ Menunggu rollout selesai..."
+  if kubectl rollout status "deployment/${deploy}" -n "$ns" --watch --timeout=120s 2>/dev/null; then
+    echo ""
+    echo "✅ Rollout selesai! Deployment '${deploy}' berhasil di-patch."
+  else
+    echo ""
+    echo "⚠️  Rollout tidak selesai dalam 120 detik. Cek status manual:"
+    echo "  kubectl rollout status deployment/${deploy} -n ${ns} --watch"
+  fi
+
+  echo ""
+  echo "Ringkasan perubahan:"
+  echo "  volumeMounts:"
+  echo "    - tz-config → /etc/localtime"
+  echo "    - file-config-volume → /.env (subPath: .env)"
+  echo "  volumes:"
+  echo "    - tz-config → hostPath /usr/share/zoneinfo/Asia/Jakarta"
+  echo "    - file-config-volume → secret ${secret_name}"
+  echo ""
+  echo "Pastikan secret '${secret_name}' sudah dibuat dengan:"
+  echo "  ~/.pi/agent/bin/generate-secret-file-config ${deploy} <path_to_env_file>"
+
+  # Export YAML final dari cluster (sudah ter-patch)
+  echo ""
+  echo "📄 Mengekspor deployment YAML ke ${output_file}..."
+  kubectl get deployment "$deploy" -n "$ns" -o yaml \
+    | sed '/^status:/,$ d' \
+    > "$output_file"
+else
+  # ============================================================
+  # Mode: DRY-RUN (default) — generate YAML saja
+  # ============================================================
+  echo "⚡ Mode: generate YAML saja (tidak ada perubahan di cluster)"
+  echo "   Gunakan --apply untuk apply ke cluster."
+  echo ""
+
+  # Generate patched YAML dengan dry-run
+  kubectl patch deployment "$deploy" -n "$ns" \
+    --type json -p "$PATCH_JSON" \
+    --dry-run=client -o yaml \
+    | sed '/^status:/,$ d' \
+    > "$output_file"
+
+  echo "✅ YAML hasil patch disimpan ke: ${output_file}"
+fi
+
+echo "  File: $(pwd)/${output_file}"
+echo "  Size: $(wc -c < "$output_file") bytes"
+echo ""
+echo "===== Selesai ====="

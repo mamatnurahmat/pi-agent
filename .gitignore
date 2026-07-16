@@ -6,18 +6,7 @@ auth.json
 locks.json
 telegram.json
 settings.json
-models.json
-trust.json
-
-# Binary tools (platform-specific)
-agent/bin/
-
-# WhatsApp extension (sensitive auth & personal data)
-agent/extensions/whatsapp-pi/auth/
-agent/extensions/whatsapp-pi/config.json
-agent/extensions/whatsapp-pi/whatsapp-pi.log
-agent/extensions/whatsapp-pi/recents/
-agent/extensions/whatsapp-pi/whatsapp-medias/
+agent/bin/__pycache__/
 
 # Project-specific ignores
 agent/skills/start-project/

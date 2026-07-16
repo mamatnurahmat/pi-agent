@@ -1,0 +1,248 @@
+#!/usr/bin/env python3
+"""k8s-init-go: Generate Deployment + Service YAML untuk Go project.
+
+Membaca cicd/cicd.json dan menghasilkan file k8s YAML untuk deployment
+dan service, dengan volumeMount ke file-config-{deployment} dan secret.
+"""
+
+import json
+import os
+import sys
+
+# ---------------------------------------------------------------------------
+# Namespace prefix mapping (sama dengan generate-secret-file-config)
+# ---------------------------------------------------------------------------
+PREFIX_MAP = [
+    ("ngenwal-be-", "production-ngenwal"),
+    ("ngenwal-", "production-ngenwal"),
+    ("plus-be-", "production-qoinplus"),
+    ("pay-be-", "production-payout"),
+    ("saas-be-", "production-saas"),
+    ("saas-", "production-saas"),
+]
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def infer_namespace(deploy_name):
+    for prefix, ns in PREFIX_MAP:
+        if deploy_name.startswith(prefix):
+            return ns
+    return "production-default"
+
+
+def infer_role(name):
+    if name.endswith("-manager"):
+        return "front"
+    return "back"
+
+
+def get_nodepool_role(role):
+    if role == "front":
+        return "manager"
+    return "service"
+
+
+def detect_region():
+    ctx = ""
+    try:
+        ctx = os.popen("kubectl config current-context 2>/dev/null").read().strip()
+    except Exception:
+        pass
+    # Context naming: hw-pro-u → "ue", hw-pro-p → "ap", hw-pro-q → "qa"
+    if ctx:
+        part = ctx.split("-")[-1]
+        if part in ("u", "ue"):
+            return "ue"
+        if part in ("p", "ap"):
+            return "ap"
+        if part in ("q", "qa"):
+            return "qa"
+    return "ue"
+
+
+def generate_deployment(name, namespace, img, port, role, project, cluster, env, image_tag):
+    nodepool_role = get_nodepool_role(role)
+    region = detect_region()
+    nodepool = f"{cluster}-{region}-nodepool-{nodepool_role}"
+
+    yaml = f"""apiVersion: apps/v1
+kind: Deployment
+metadata:
+  annotations:
+    meta.helm.sh/release-name: {name}
+    meta.helm.sh/release-namespace: {namespace}
+  labels:
+    app: {name}
+    app.kubernetes.io/instance: {namespace}
+    app.kubernetes.io/managed-by: Helm
+    env: {env}
+    language: go
+    project: {project}
+    repo: {name}
+    role: {role}
+    secret-file: dotenv
+  name: {name}
+  namespace: {namespace}
+spec:
+  progressDeadlineSeconds: 600
+  replicas: 0
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      app: {name}
+      env: {env}
+      project: {project}
+      role: {role}
+  strategy:
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+    type: RollingUpdate
+  template:
+    metadata:
+      annotations:
+        field.cattle.io/ports: '[[{{"containerPort":{port},"dnsName":"{name}","kind":"ClusterIP","name":"http","protocol":"TCP"}}]]'
+      labels:
+        app: {name}
+        env: {env}
+        project: {project}
+        role: {role}
+    spec:
+      containers:
+        - image: {img}
+          imagePullPolicy: IfNotPresent
+          name: {name}
+          ports:
+            - containerPort: {port}
+              name: http
+              protocol: TCP
+          resources: {{}}
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          volumeMounts:
+            - mountPath: /etc/localtime
+              name: tz-config
+            - mountPath: /app/.env
+              name: file-config-volume
+              subPath: .env
+      dnsPolicy: ClusterFirst
+      imagePullSecrets:
+        - name: regcred
+      nodeSelector:
+        cce.cloud.com/cce-nodepool: {nodepool}
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      securityContext: {{}}
+      serviceAccount: default
+      serviceAccountName: default
+      terminationGracePeriodSeconds: 30
+      volumes:
+        - hostPath:
+            path: /usr/share/zoneinfo/Asia/Jakarta
+            type: ""
+          name: tz-config
+        - name: file-config-volume
+          secret:
+            defaultMode: 420
+            secretName: file-config-{name}
+"""
+    return yaml
+
+
+def generate_service(name, namespace, port, role, project, env):
+    svc_port = port if role == "front" else 80
+
+    yaml = f"""apiVersion: v1
+kind: Service
+metadata:
+  annotations:
+    meta.helm.sh/release-name: {name}
+    meta.helm.sh/release-namespace: {namespace}
+  labels:
+    app: {name}
+    app.kubernetes.io/instance: {namespace}
+    app.kubernetes.io/managed-by: Helm
+    env: {env}
+    project: {project}
+    role: {role}
+  name: {name}
+  namespace: {namespace}
+spec:
+  internalTrafficPolicy: Cluster
+  ipFamilies:
+    - IPv4
+  ipFamilyPolicy: SingleStack
+  ports:
+    - name: http
+      port: {svc_port}
+      protocol: TCP
+      targetPort: http
+  selector:
+    app: {name}
+    env: {env}
+    project: {project}
+    role: {role}
+  sessionAffinity: None
+  type: ClusterIP
+"""
+    return yaml
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def main():
+    cicd_path = "cicd/cicd.json"
+    if not os.path.exists(cicd_path):
+        print(f"❌ Error: {cicd_path} tidak ditemukan.")
+        sys.exit(1)
+
+    with open(cicd_path) as f:
+        cfg = json.load(f)
+
+    deploy_name = cfg.get("DEPLOYMENT") or cfg.get("IMAGE") or os.path.basename(os.getcwd())
+    image_name = cfg.get("IMAGE") or deploy_name
+    project = cfg.get("PROJECT") or deploy_name
+    cluster = cfg.get("CLUSTER", "production")
+    env = cfg.get("ENV", "production")
+    port = str(cfg.get("PORT", "8080"))
+    role = cfg.get("NODETYPE") or infer_role(deploy_name)
+    image_tag = cfg.get("IMAGE_TAG") or "local"
+    namespace = cfg.get("NAMESPACE") or infer_namespace(deploy_name)
+
+    image = f"loyaltolpi/{image_name}:{image_tag}"
+
+    print(f"📦 Deployment: {deploy_name}")
+    print(f"   Namespace:  {namespace}")
+    print(f"   Project:    {project}")
+    print(f"   Cluster:    {cluster}")
+    print(f"   Role:       {role}")
+    print(f"   Port:       {port}")
+    print(f"   Image:      {image}")
+    print(f"   Secret:     file-config-{deploy_name}")
+
+    # Generate Deployment
+    dep_yaml = generate_deployment(deploy_name, namespace, image, port, role,
+                                    project, cluster, env, image_tag)
+    dep_file = f"{deploy_name}_deployment.yaml"
+    with open(dep_file, "w") as f:
+        f.write(dep_yaml)
+    print(f"✅ {dep_file}")
+
+    # Generate Service
+    svc_yaml = generate_service(deploy_name, namespace, port, role, project, env)
+    svc_file = f"{deploy_name}_services.yaml"
+    with open(svc_file, "w") as f:
+        f.write(svc_yaml)
+    print(f"✅ {svc_file}")
+
+    print(f"\n🚀 Apply ke cluster:")
+    print(f"   kubectl apply -f {dep_file}")
+    print(f"   kubectl apply -f {svc_file}")
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,242 @@
+#!/usr/bin/env python3
+"""S3 bucket manager untuk NEO Object Storage."""
+import os
+import sys
+import json
+from urllib.parse import urlparse
+
+import warnings
+import urllib3
+warnings.filterwarnings("ignore", category=urllib3.exceptions.InsecureRequestWarning)
+
+import boto3
+from botocore.client import Config
+
+ENV_KEYS = {
+    "access_key": "NEO_ACCESS_KEY",
+    "secret_key": "NEO_SECRET_KEY",
+    "endpoint": "NEO_ENDPOINT_URL",
+    "region": "NEO_REGION",
+    "ssl_verify": "NEO_SSL_VERIFY",
+}
+
+def get_client():
+    ak = os.environ.get("NEO_ACCESS_KEY")
+    sk = os.environ.get("NEO_SECRET_KEY")
+    ep = os.environ.get("NEO_ENDPOINT_URL")
+    region = os.environ.get("NEO_REGION", "idn")
+    ssl = os.environ.get("NEO_SSL_VERIFY", "True").lower() in ("true", "1", "yes")
+
+    missing = [v for k, v in ENV_KEYS.items()
+               if v != "NEO_SSL_VERIFY" and not os.environ.get(v)]
+    if missing:
+        print(f"❌ Env vars belum diset: {', '.join(missing)}", file=sys.stderr)
+        print("   Tambahkan di ~/.zshrc:", file=sys.stderr)
+        for v in missing:
+            print(f"   export {v}=\"<value>\"", file=sys.stderr)
+        sys.exit(1)
+
+    return boto3.client(
+        "s3",
+        aws_access_key_id=ak,
+        aws_secret_access_key=sk,
+        endpoint_url=ep,
+        region_name=region,
+        verify=ssl,
+        config=Config(signature_version="s3v4"),
+    )
+
+def cmd_list(args):
+    s3 = get_client()
+    resp = s3.list_buckets()
+    buckets = resp.get("Buckets", [])
+    if not buckets:
+        print("Belum ada bucket.")
+        return
+    print(f"{'Bucket Name':40s}  {'Created':25s}")
+    print("-" * 67)
+    for b in sorted(buckets, key=lambda x: x["CreationDate"]):
+        name = b["Name"]
+        created = b["CreationDate"].strftime("%Y-%m-%d %H:%M:%S")
+        print(f"{name:40s}  {created}")
+
+def cmd_create(args):
+    if not args:
+        print("Usage: neo-s3 create <bucket-name>", file=sys.stderr)
+        sys.exit(1)
+    name = args[0]
+    s3 = get_client()
+    try:
+        s3.create_bucket(Bucket=name)
+        print(f"✅ Bucket '{name}' berhasil dibuat.")
+    except Exception as e:
+        print(f"❌ Gagal buat bucket: {e}", file=sys.stderr)
+        sys.exit(1)
+
+def cmd_delete(args):
+    if not args:
+        print("Usage: neo-s3 delete <bucket-name>", file=sys.stderr)
+        sys.exit(1)
+    name = args[0]
+
+    print(f"\n⚠️  PERINGATAN: Anda akan menghapus bucket '{name}' PERMANEN!")
+    print("   Semua data di dalamnya akan hilang dan tidak bisa dikembalikan.")
+    print()
+
+    # Approval 1: ketik nama bucket
+    confirm1 = input(f"Ketik nama bucket untuk konfirmasi: ").strip()
+    if confirm1 != name:
+        print("❌ Nama bucket tidak cocok. Dibatalkan.")
+        sys.exit(1)
+
+    # Approval 2: ketik 'yes'
+    confirm2 = input(f"Ketik 'yes' untuk konfirmasi penghapusan '{name}': ").strip().lower()
+    if confirm2 != "yes":
+        print("❌ Konfirmasi tidak diberikan. Dibatalkan.")
+        sys.exit(1)
+
+    s3 = get_client()
+    try:
+        # Kosongkan bucket dulu sebelum delete
+        try:
+            objects = s3.list_objects_v2(Bucket=name)
+            if objects.get("KeyCount", 0) > 0:
+                print(f"   🗑️  Menghapus {objects['KeyCount']} objek di dalam bucket...")
+                delete_keys = [{"Key": obj["Key"]} for obj in objects.get("Contents", [])]
+                s3.delete_objects(Bucket=name, Delete={"Objects": delete_keys})
+        except Exception:
+            pass  # bucket mungkin udah kosong
+
+        s3.delete_bucket(Bucket=name)
+        print(f"✅ Bucket '{name}' berhasil dihapus.")
+    except Exception as e:
+        print(f"❌ Gagal hapus bucket: {e}", file=sys.stderr)
+        sys.exit(1)
+
+def bucket_info(s3, name, quick=False):
+    """Return (files, folders, size_bytes) for one bucket. quick=True → first 1000 objects."""
+    total_size = 0
+    total_files = 0
+    folders = set()
+
+    if quick:
+        resp = s3.list_objects_v2(Bucket=name, MaxKeys=1000)
+        for obj in resp.get("Contents", []):
+            if obj["Key"] != "":
+                total_files += 1
+                total_size += obj["Size"]
+                if "/" in obj["Key"]:
+                    folders.add(obj["Key"].rsplit("/", 1)[0] + "/")
+    else:
+        paginator = s3.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=name):
+            for obj in page.get("Contents", []):
+                if obj["Key"] != "":
+                    total_files += 1
+                    total_size += obj["Size"]
+                    if "/" in obj["Key"]:
+                        folders.add(obj["Key"].rsplit("/", 1)[0] + "/")
+    return total_files, len(folders), total_size
+
+
+def fmt_size(n):
+    for unit in ["B", "KB", "MB", "GB", "TB"]:
+        if n < 1024:
+            return f"{n:.1f} {unit}"
+        n /= 1024
+    return f"{n:.1f} PB"
+
+
+def cmd_info(args):
+    s3 = get_client()
+
+    # parse flags
+    show_all = "--all" in args
+    quick = "--quick" in args
+    names = [a for a in args if not a.startswith("--")]
+
+    if show_all:
+        resp = s3.list_buckets()
+        buckets = sorted(resp.get("Buckets", []), key=lambda x: x["Name"])
+        if not buckets:
+            print("Belum ada bucket.")
+            return
+        print(f"{'Bucket Name':40s}  {'Files':>10s}  {'Size':>12s}  {'Quick?'}")
+        print("-" * 70)
+        for b in buckets:
+            name = b["Name"]
+            try:
+                files, folders, size = bucket_info(s3, name, quick=quick)
+                print(f"{name:40s}  {files:>10,}  {fmt_size(size):>12s}  {'⚡' if quick else '✓'}")
+            except Exception as e:
+                print(f"{name:40s}  {'—':>10s}  {'—':>12s}  ❌ {e}")
+        return
+
+    if not names:
+        print("Usage: neo-s3 info <bucket-name> [--quick] [--all]", file=sys.stderr)
+        sys.exit(1)
+
+    name = names[0]
+    try:
+        s3.head_bucket(Bucket=name)
+        loc = s3.get_bucket_location(Bucket=name)
+        versioning = s3.get_bucket_versioning(Bucket=name)
+
+        print(f"Nama         : {name}")
+        print(f"Region       : {loc.get('LocationConstraint', '—')}")
+        print(f"Versioning   : {versioning.get('Status', 'Disabled')}")
+        print(f"Tags         : ", end="")
+        try:
+            tags = s3.get_bucket_tagging(Bucket=name)
+            tag_list = tags.get("TagSet", [])
+            if tag_list:
+                print(json.dumps({t["Key"]: t["Value"] for t in tag_list}))
+            else:
+                print("—")
+        except s3.exceptions.ClientError as e:
+            if e.response["Error"]["Code"] == "NoSuchTagSet":
+                print("—")
+            else:
+                raise
+
+        files, folders, size = bucket_info(s3, name, quick=quick)
+        print(f"Files        : {files:,}" + (" (first 1000 only)" if quick else ""))
+        print(f"Folders      : {folders:,}" + (" (first 1000 only)" if quick else ""))
+        print(f"Total Size   : {fmt_size(size)}" + (" (estimate)" if quick else ""))
+    except s3.exceptions.ClientError as e:
+        code = e.response["Error"]["Code"]
+        if code == "404":
+            print(f"❌ Bucket '{name}' tidak ditemukan.", file=sys.stderr)
+        elif code == "403":
+            print(f"❌ Tidak punya akses ke bucket '{name}'.", file=sys.stderr)
+        else:
+            print(f"❌ Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+def main():
+    cmds = {
+        "list": ("📋 List semua bucket", cmd_list),
+        "create": ("🆕 Buat bucket baru", cmd_create),
+        "delete": ("🗑️  Hapus bucket (perlu 2x approval)", cmd_delete),
+        "info": ("ℹ️  Info detail bucket (--quick, --all)", cmd_info),
+    }
+
+    if len(sys.argv) < 2 or sys.argv[1] not in cmds:
+        print("Penggunaan: neo-s3 <action> [bucket-name]")
+        print()
+        print("Actions:")
+        for k, (desc, _) in cmds.items():
+            print(f"  {k:8s}  {desc}")
+        print()
+        print("Env (dari ~/.zshrc):")
+        for v in ENV_KEYS.values():
+            val = os.environ.get(v, "—")
+            masked = val[:8] + "..." if v != "NEO_SSL_VERIFY" and len(val) > 8 else val
+            print(f"  {v:20s} = {masked}")
+        sys.exit(1 if len(sys.argv) < 2 else 0)
+
+    action = sys.argv[1]
+    cmds[action][1](sys.argv[2:])
+
+if __name__ == "__main__":
+    main()

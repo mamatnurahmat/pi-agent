@@ -1,0 +1,37 @@
+#!/bin/bash
+# Clone repo GitHub single-branch
+# Usage: gh-clone <repo> <ref> [org]
+# Default org: Qoin-Digital-Indonesia
+
+ORG="${3:-Qoin-Digital-Indonesia}"
+REPO="$1"
+REF="$2"
+
+if [ -z "$REPO" ] || [ -z "$REF" ]; then
+  echo "Usage: gh-clone <repo> <ref> [org]"
+  echo ""
+  echo "Clone repo GitHub single-branch"
+  echo ""
+  echo "Args:"
+  echo "  repo   Nama repository"
+  echo "  ref    Branch atau tag (e.g. main, v1.0.0)"
+  echo "  org    Organization (default: Qoin-Digital-Indonesia)"
+  echo ""
+  echo "Contoh:"
+  echo "  gh-clone saas-be-profile-manager main"
+  echo "  gh-clone saas-be-profile-manager v1.2.0"
+  echo "  gh-clone my-repo main MyOrg"
+  exit 1
+fi
+
+DIR="${REPO}"
+
+echo "📦 Clone single-branch '${REF}' dari ${ORG}/${REPO}..."
+gh repo clone "${ORG}/${REPO}" "${DIR}" -- --single-branch --branch "${REF}"
+
+if [ $? -eq 0 ]; then
+  echo "✅ ${ORG}/${REPO}@${REF} → ${PWD}/${DIR}"
+else
+  echo "❌ Gagal clone ${ORG}/${REPO}" >&2
+  exit 1
+fi

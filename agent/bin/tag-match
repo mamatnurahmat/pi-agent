@@ -1,0 +1,51 @@
+#!/bin/bash
+
+# Check whether a deployment's current image tag matches the latest GitHub release tag
+# Usage: tag-match <namespace> <repo/deployment>
+# Output: CSV printed to stdout (header + 1 data row)
+#
+# Examples:
+#   tag-match production-saas saas-be-loyalty-module
+#   tag-match production-payout saas-be-payout
+
+NS="$1"
+DEPLOY="$2"
+
+if [ -z "$NS" ] || [ -z "$DEPLOY" ]; then
+  echo "Usage: $(basename "$0") <namespace> <repo/deployment>"
+  echo ""
+  echo "Compare the latest GitHub release tag with the currently deployed"
+  echo "image tag in the Kubernetes cluster, and output a CSV row."
+  echo ""
+  echo "Examples:"
+  echo "  $(basename "$0") production-saas saas-be-loyalty-module"
+  echo "  $(basename "$0") production-payout saas-be-payout"
+  exit 1
+fi
+
+BIN_DIR="$(dirname "$(realpath "$0")")"
+
+# Get latest tag from GitHub
+GH_TAG=$("${BIN_DIR}/gh-latest-tag" "$DEPLOY" 2>/dev/null)
+GH_EXIT=$?
+
+# Get current image tag from Kubernetes
+K8S_TAG=$("${BIN_DIR}/k8s-latest-tag" "$NS" "$DEPLOY" 2>/dev/null)
+K8S_EXIT=$?
+
+# Determine status
+if [ $GH_EXIT -ne 0 ] && [ $K8S_EXIT -ne 0 ]; then
+  STATUS="NO_TAG_NO_IMAGE"
+elif [ $GH_EXIT -ne 0 ]; then
+  STATUS="NO_GH_TAG"
+elif [ $K8S_EXIT -ne 0 ]; then
+  STATUS="NO_K8S_IMAGE"
+elif [ "$GH_TAG" = "$K8S_TAG" ]; then
+  STATUS="MATCH"
+else
+  STATUS="NOT_MATCH"
+fi
+
+# Print CSV header + result
+echo "deploy,k8s_tag,github_tag,status"
+echo "${DEPLOY},${K8S_TAG:--},${GH_TAG:--},${STATUS}"

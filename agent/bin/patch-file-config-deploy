@@ -1,0 +1,251 @@
+#!/bin/bash
+set -euo pipefail
+
+# ============================================================
+# patch-file-config-deploy — Patch deployment dengan volume &
+# volumeMount untuk semua file konfigurasi dari secret
+# (auto-detect: .env, .app.config, dll) + timezone Asia/Jakarta
+#
+# Args:
+#   $1: namespace
+#   $2: deployment name
+#   $3: (optional) --apply
+#        Jika ada, apply patch ke cluster + rollout.
+#        Default: hanya generate YAML ({deploy}_deployment.yaml).
+#
+# Output:
+#   - (default) Generate YAML hasil patch, tanpa perubahan cluster
+#   - (--apply) Apply ke cluster + rollout + export YAML
+#   - File YAML: {deploy}_deployment.yaml
+#
+# Contoh:
+#   patch-file-config-deploy production-saas saas-be-clientapi-module           # generate YAML saja
+#   patch-file-config-deploy production-saas saas-be-clientapi-module --apply   # apply ke cluster
+# ============================================================
+
+if [ "$#" -lt 2 ]; then
+  echo "Usage: $(basename "$0") <namespace> <deployment> [--apply]"
+  echo ""
+  echo "Contoh:"
+  echo "  $(basename "$0") production-saas saas-be-clientapi-module       # generate YAML saja"
+  echo "  $(basename "$0") production-saas saas-be-clientapi-module --apply # apply ke cluster"
+  exit 1
+fi
+
+ns="$1"
+deploy="$2"
+secret_name="file-config-${deploy}"
+output_file="${deploy}_deployment.yaml"
+
+# Cek flag --apply
+APPLY=false
+if [ "${3:-}" = "--apply" ]; then
+  APPLY=true
+fi
+
+# ============================================================
+# 1. Validasi deployment & secret exist
+# ============================================================
+if ! kubectl get deployment "$deploy" -n "$ns" &>/dev/null; then
+  echo "❌ Error: Deployment '${deploy}' tidak ditemukan di namespace '${ns}'."
+  exit 1
+fi
+echo "✓ Deployment '${deploy}' ditemukan di namespace '${ns}'"
+
+if ! kubectl get secret "$secret_name" -n "$ns" &>/dev/null; then
+  echo "❌ Error: Secret '${secret_name}' tidak ditemukan di namespace '${ns}'."
+  echo "   Buat dulu secret-nya sebelum menjalankan script ini."
+  echo ""
+  echo "   Contoh membuat secret dari file .env:"
+  echo "     kubectl create secret generic ${secret_name} \\"
+  echo "       --from-file=.env=./.env \\"
+  echo "       --from-file=.app.config=./.app.config \\"
+  echo "       -n ${ns}"
+  exit 1
+fi
+
+# ============================================================
+# 2. Deteksi semua file (key) di dalam secret
+# ============================================================
+echo "🔍 Membaca data di secret '${secret_name}'..."
+
+secret_keys=$(kubectl get secret "$secret_name" -n "$ns" -o jsonpath='{.data}' | jq -r 'keys[]' 2>/dev/null)
+
+if [ -z "$secret_keys" ]; then
+  echo "❌ Error: Secret '${secret_name}' tidak memiliki data (kosong)."
+  exit 1
+fi
+
+echo "📁 File yang terdeteksi di secret:"
+echo "$secret_keys" | while read -r key; do
+  echo "   - ${key}"
+done
+
+# ============================================================
+# 3. Cek volumeMounts & volumes yang sudah ada
+# ============================================================
+echo ""
+echo "🔍 Memeriksa volume & volumeMount yang sudah ada..."
+
+# VolumeMount yang sudah ada
+existing_mounts=$(kubectl get deployment "$deploy" -n "$ns" -o json 2>/dev/null | \
+  jq '[.spec.template.spec.containers[0].volumeMounts[]? // empty | .name]' 2>/dev/null || echo "[]")
+
+# VolumeMount detail (name + subPath) untuk cek lebih presisi
+existing_mount_details=$(kubectl get deployment "$deploy" -n "$ns" -o json 2>/dev/null | \
+  jq '[.spec.template.spec.containers[0].volumeMounts[]? // empty | {name: .name, mountPath: .mountPath, subPath: (.subPath // "")}]' 2>/dev/null || echo "[]")
+
+# Volumes yang sudah ada
+existing_volumes=$(kubectl get deployment "$deploy" -n "$ns" -o json 2>/dev/null | \
+  jq '[.spec.template.spec.volumes[]? // empty | .name]' 2>/dev/null || echo "[]")
+
+# ============================================================
+# 4. Bangun JSON patch
+# ============================================================
+PATCH_OPS=()
+
+# --- volumeMount: tz-config ---
+has_tz_mount=$(echo "$existing_mounts" | jq 'contains(["tz-config"])')
+if [ "$has_tz_mount" = "true" ]; then
+  echo "  ✓ volumeMount 'tz-config' sudah ada — skip"
+else
+  echo "  + Menambahkan volumeMount 'tz-config'"
+  PATCH_OPS+=("{\"op\": \"add\", \"path\": \"/spec/template/spec/containers/0/volumeMounts/-\", \"value\": {\"mountPath\": \"/etc/localtime\", \"name\": \"tz-config\"}}")
+fi
+
+# --- volumeMount: file-config-volume (satu per file di secret) ---
+echo ""
+echo "🔍 Memeriksa volumeMount untuk setiap file di secret..."
+
+while IFS= read -r key; do
+  mount_path="/${key}"
+  
+  # Cek apakah mountPath + subPath ini sudah ada
+  already_mounted=$(echo "$existing_mount_details" | jq --arg mp "$mount_path" --arg sp "$key" \
+    'any(.[]; .mountPath == $mp and .subPath == $sp)' 2>/dev/null || echo "false")
+  
+  if [ "$already_mounted" = "true" ]; then
+    echo "  ✓ volumeMount untuk '${key}' (${mount_path}) sudah ada — skip"
+  else
+    echo "  + Menambahkan volumeMount untuk '${key}' (${mount_path})"
+    PATCH_OPS+=("{\"op\": \"add\", \"path\": \"/spec/template/spec/containers/0/volumeMounts/-\", \"value\": {\"mountPath\": \"${mount_path}\", \"name\": \"file-config-volume\", \"subPath\": \"${key}\"}}")
+  fi
+done <<< "$secret_keys"
+
+echo ""
+
+# --- volume: tz-config (hostPath) ---
+has_tz_vol=$(echo "$existing_volumes" | jq 'contains(["tz-config"])')
+if [ "$has_tz_vol" = "true" ]; then
+  echo "  ✓ volume 'tz-config' sudah ada — skip"
+else
+  echo "  + Menambahkan volume 'tz-config' (hostPath Asia/Jakarta)"
+  PATCH_OPS+=("{\"op\": \"add\", \"path\": \"/spec/template/spec/volumes/-\", \"value\": {\"hostPath\": {\"path\": \"/usr/share/zoneinfo/Asia/Jakarta\", \"type\": \"\"}, \"name\": \"tz-config\"}}")
+fi
+
+# --- volume: file-config-volume (secret) ---
+has_file_vol=$(echo "$existing_volumes" | jq 'contains(["file-config-volume"])')
+if [ "$has_file_vol" = "true" ]; then
+  echo "  ✓ volume 'file-config-volume' sudah ada — skip"
+else
+  echo "  + Menambahkan volume 'file-config-volume' (secret: ${secret_name})"
+  PATCH_OPS+=("{\"op\": \"add\", \"path\": \"/spec/template/spec/volumes/-\", \"value\": {\"name\": \"file-config-volume\", \"secret\": {\"defaultMode\": 420, \"secretName\": \"${secret_name}\"}}}")
+fi
+
+# ============================================================
+# 5. Generate / Apply patch
+# ============================================================
+if [ ${#PATCH_OPS[@]} -eq 0 ]; then
+  echo ""
+  echo "✅ Semua volume & volumeMount sudah terpasang. Tidak ada perubahan."
+  echo ""
+  echo "Ringkasan:"
+  echo "  volumeMounts:"
+  echo "    - tz-config → /etc/localtime"
+  while IFS= read -r key; do
+    echo "    - file-config-volume → /${key} (subPath: ${key})"
+  done <<< "$secret_keys"
+  echo "  volumes:"
+  echo "    - tz-config → hostPath /usr/share/zoneinfo/Asia/Jakarta"
+  echo "    - file-config-volume → secret ${secret_name}"
+
+  # Tetap export YAML existing
+  echo ""
+  echo "📄 Mengekspor deployment YAML ke ${output_file}..."
+  kubectl get deployment "$deploy" -n "$ns" -o yaml \
+    | sed '/^status:/,$ d' \
+    > "$output_file"
+  echo "  File: $(pwd)/${output_file}"
+  echo "  Size: $(wc -c < "$output_file") bytes"
+
+  echo ""
+  echo "===== Selesai ====="
+  exit 0
+fi
+
+# Gabungkan patch ops jadi array JSON
+PATCH_JSON=$(printf '%s\n' "${PATCH_OPS[@]}" | jq -s -c '.')
+
+echo ""
+echo "📝 Patch JSON yang akan diterapkan:"
+echo "$PATCH_JSON" | jq '.'
+echo ""
+
+if [ "$APPLY" = "true" ]; then
+  # ============================================================
+  # Mode: APPLY ke cluster
+  # ============================================================
+  echo "📝 Menerapkan patch ke deployment '${deploy}'..."
+  kubectl patch deployment "$deploy" -n "$ns" --type json -p "$PATCH_JSON"
+
+  # Rollout status
+  echo ""
+  echo "⏳ Menunggu rollout selesai..."
+  if kubectl rollout status "deployment/${deploy}" -n "$ns" --watch --timeout=120s 2>/dev/null; then
+    echo ""
+    echo "✅ Rollout selesai! Deployment '${deploy}' berhasil di-patch."
+  else
+    echo ""
+    echo "⚠️  Rollout tidak selesai dalam 120 detik. Cek status manual:"
+    echo "  kubectl rollout status deployment/${deploy} -n ${ns} --watch"
+  fi
+
+  echo ""
+  echo "Ringkasan perubahan:"
+  echo "  volumeMounts:"
+  echo "    - tz-config → /etc/localtime"
+  while IFS= read -r key; do
+    echo "    - file-config-volume → /${key} (subPath: ${key})"
+  done <<< "$secret_keys"
+  echo "  volumes:"
+  echo "    - tz-config → hostPath /usr/share/zoneinfo/Asia/Jakarta"
+  echo "    - file-config-volume → secret ${secret_name}"
+
+  # Export YAML final dari cluster (sudah ter-patch)
+  echo ""
+  echo "📄 Mengekspor deployment YAML ke ${output_file}..."
+  kubectl get deployment "$deploy" -n "$ns" -o yaml \
+    | sed '/^status:/,$ d' \
+    > "$output_file"
+else
+  # ============================================================
+  # Mode: DRY-RUN (default) — generate YAML saja
+  # ============================================================
+  echo "⚡ Mode: generate YAML saja (tidak ada perubahan di cluster)"
+  echo "   Gunakan --apply untuk apply ke cluster."
+  echo ""
+
+  # Generate patched YAML dengan dry-run
+  kubectl patch deployment "$deploy" -n "$ns" \
+    --type json -p "$PATCH_JSON" \
+    --dry-run=client -o yaml \
+    | sed '/^status:/,$ d' \
+    > "$output_file"
+
+  echo "✅ YAML hasil patch disimpan ke: ${output_file}"
+fi
+
+echo "  File: $(pwd)/${output_file}"
+echo "  Size: $(wc -c < "$output_file") bytes"
+echo ""
+echo "===== Selesai ====="

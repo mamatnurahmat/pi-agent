@@ -1,0 +1,71 @@
+#!/bin/bash
+
+# Script to get all data keys from a Kubernetes file-config secret
+# Arguments:
+# $1: namespace
+# $2: secret name (if it doesn't start with 'file-config-', it will be prepended automatically)
+# $3: (optional) decode. Default: "true". Set to "false" to show raw base64 values.
+
+NAMESPACE="$1"
+NAME="$2"
+DECODE="${3:-true}"
+
+if [ -z "$NAMESPACE" ] || [ -z "$NAME" ]; then
+  echo "Usage: $(basename "$0") <namespace> <name> [decode=true|false]"
+  echo ""
+  echo "Contoh:"
+  echo "  $(basename "$0") production-saas saas-be-clientapi-module"
+  echo "  $(basename "$0") production-saas saas-be-clientapi-module false"
+  exit 1
+fi
+
+# Check if name already starts with 'file-config-'
+if [[ "$NAME" != file-config-* ]]; then
+  SECRET_NAME="file-config-${NAME}"
+else
+  SECRET_NAME="$NAME"
+fi
+
+# Validate decode argument
+if [ "$DECODE" != "true" ] && [ "$DECODE" != "false" ]; then
+  echo "Argumen decode harus 'true' atau 'false' (default: true)"
+  exit 1
+fi
+
+# Check if secret exists
+if ! kubectl get secret "$SECRET_NAME" -n "$NAMESPACE" &>/dev/null; then
+  echo "Error: Secret '${SECRET_NAME}' tidak ditemukan di namespace '${NAMESPACE}'."
+  exit 1
+fi
+
+echo "===== Secret: ${SECRET_NAME} (namespace: ${NAMESPACE}) ====="
+echo ""
+
+# Fetch all data keys
+KEYS=$(kubectl get secret "$SECRET_NAME" -n "$NAMESPACE" -o json | jq -r '.data | keys[]' 2>/dev/null)
+
+if [ -z "$KEYS" ]; then
+  echo "Tidak ada data di secret ini."
+  exit 0
+fi
+
+if [ "$DECODE" = "true" ]; then
+  echo "Menampilkan data (base64 decoded):"
+  echo "----------------------------------------"
+  while IFS= read -r key; do
+    echo "--- key: $key ---"
+    kubectl get secret "$SECRET_NAME" -n "$NAMESPACE" -o go-template="{{index .data \"$key\" | base64decode}}"
+    echo ""
+    echo ""
+  done <<< "$KEYS"
+else
+  echo "Menampilkan data (raw base64):"
+  echo "----------------------------------------"
+  while IFS= read -r key; do
+    echo "--- key: $key ---"
+    kubectl get secret "$SECRET_NAME" -n "$NAMESPACE" -o json | jq -r ".data[\"$key\"]"
+    echo ""
+  done <<< "$KEYS"
+fi
+
+echo "===== Selesai ====="

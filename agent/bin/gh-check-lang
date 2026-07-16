@@ -1,0 +1,39 @@
+#!/bin/bash
+
+# Script to check the primary programming language of a GitHub repository
+# Organization is hardcoded to Qoin-Digital-Indonesia
+# Arguments:
+# $1: repo name
+# $2: branch name (optional, defaults to 'staging')
+
+ORG="Qoin-Digital-Indonesia"
+REPO="$1"
+# Jika arg2 kosong, gunakan 'staging' sebagai default
+BRANCH="${2:-staging}"
+
+if [ -z "$REPO" ]; then
+  echo "Usage: $(basename "$0") <repo> [branch]"
+  echo "Example: $(basename "$0") saas-be-profile-manager main"
+  exit 1
+fi
+
+# Fetch the repository tree recursively for the given branch
+# Mengambil daftar path file untuk mengecek ekstensi dan nama file
+TREE=$(gh api "/repos/${ORG}/${REPO}/git/trees/${BRANCH}?recursive=1" --jq '.tree[].path' 2>/dev/null)
+
+# Jika gagal mengambil data (misalnya repo/branch tidak ditemukan), output unknown
+if [ $? -ne 0 ] || [ -z "$TREE" ]; then
+  echo "unknown"
+  exit 0
+fi
+
+# Cek kondisi sesuai dengan aturan yang diminta
+if echo "$TREE" | grep -E -q 'go\.mod$|\.go$'; then
+  echo "go"
+elif echo "$TREE" | grep -E -q 'appsettings\.json$'; then
+  echo "dotnet"
+elif echo "$TREE" | grep -E -q 'package\.json$'; then
+  echo "nodejs"
+else
+  echo "unknown"
+fi
