@@ -1,0 +1,465 @@
+#!/bin/bash
+set -euo pipefail
+
+# ============================================================
+# ovpn - OpenVPN Manager via CLI
+# List, connect, disconnect, dan switch antar config VPN
+# Location: ~/.pi/agent/bin/ovpn
+# ============================================================
+
+SCRIPT_NAME="$(basename "$0")"
+OPENVPN_BIN=""
+CONFIG_DIRS=(
+  "$HOME/Downloads"
+  "$HOME/.config/openvpn"
+  "$HOME/vpn"
+  "/etc/openvpn"
+)
+
+# ============================================================
+# Fungsi: Deteksi OpenVPN binary
+# ============================================================
+detect_openvpn() {
+  # Common locations
+  local paths=(
+    "/usr/local/opt/openvpn/sbin/openvpn"
+    "/opt/homebrew/opt/openvpn/sbin/openvpn"
+    "/usr/local/sbin/openvpn"
+    "/usr/sbin/openvpn"
+    "/usr/bin/openvpn"
+  )
+
+  for p in "${paths[@]}"; do
+    if [[ -x "$p" ]]; then
+      OPENVPN_BIN="$p"
+      return 0
+    fi
+  done
+
+  # Fallback ke which
+  OPENVPN_BIN="$(which openvpn 2>/dev/null || true)"
+  if [[ -n "$OPENVPN_BIN" ]]; then
+    return 0
+  fi
+
+  return 1
+}
+
+# ============================================================
+# Fungsi: Cari file .ovpn
+# ============================================================
+find_configs() {
+  local configs=()
+  for dir in "${CONFIG_DIRS[@]}"; do
+    if [[ -d "$dir" ]]; then
+      while IFS= read -r -d '' f; do
+        configs+=("$f")
+      done < <(find "$dir" -maxdepth 1 -name "*.ovpn" -print0 2>/dev/null)
+    fi
+  done
+
+  if [[ ${#configs[@]} -eq 0 ]]; then
+    # Fallback: scan seluruh home
+    while IFS= read -r -d '' f; do
+      configs+=("$f")
+    done < <(find "$HOME" -maxdepth 4 -name "*.ovpn" -print0 2>/dev/null)
+  fi
+
+  printf "%s\n" "${configs[@]}"
+}
+
+# ============================================================
+# Fungsi: Ambil nama config dari path file
+# ============================================================
+config_name() {
+  local path="$1"
+  local base
+  base="$(basename "$path" .ovpn)"
+  echo "$base"
+}
+
+# ============================================================
+# Fungsi: Cek apakah ada proses OpenVPN berjalan
+# ============================================================
+get_active_pids() {
+  pgrep -f "openvpn" 2>/dev/null || true
+}
+
+get_active_configs() {
+  local pids
+  pids=$(get_active_pids)
+  if [[ -z "$pids" ]]; then
+    return
+  fi
+
+  for pid in $pids; do
+    local cmdline
+    cmdline=$(ps -p "$pid" -o args= 2>/dev/null || true)
+    if echo "$cmdline" | grep -q "\.ovpn"; then
+      local cfg_path
+      cfg_path=$(echo "$cmdline" | grep -o '/[^ ]*\.ovpn' || true)
+      echo "$pid|$cfg_path"
+    fi
+  done
+}
+
+# ============================================================
+# COMMAND: list - Tampilkan semua config yang tersedia
+# ============================================================
+cmd_list() {
+  local configs=()
+  while IFS= read -r line; do
+    configs+=("$line")
+  done < <(find_configs)
+
+  if [[ ${#configs[@]} -eq 0 ]]; then
+    echo "Tidak ada file .ovpn ditemukan."
+    echo "Cari di: ${CONFIG_DIRS[*]}"
+    return 1
+  fi
+
+  echo "============================================"
+  echo "  Daftar Config VPN (.ovpn) Tersedia"
+  echo "============================================"
+  echo ""
+
+  local active
+  active=$(get_active_configs)
+  local active_name=""
+  if [[ -n "$active" ]]; then
+    local active_cfg
+    active_cfg=$(echo "$active" | cut -d'|' -f2)
+    active_name=$(config_name "$active_cfg")
+  fi
+
+  local idx=0
+  for cfg in "${configs[@]}"; do
+    idx=$((idx + 1))
+    local name
+    name=$(config_name "$cfg")
+    local marker=""
+    if [[ "$name" == "$active_name" ]]; then
+      marker="  <<< AKTIF"
+    fi
+    printf "  %2d. %s%s\n" "$idx" "$name" "$marker"
+  done
+
+  echo ""
+  echo "Total: $idx config(s)"
+  echo ""
+  echo "Gunakan: $SCRIPT_NAME connect <nama|nomor>"
+}
+
+# ============================================================
+# COMMAND: status - Tampilkan status koneksi
+# ============================================================
+cmd_status() {
+  local active
+  active=$(get_active_configs)
+
+  echo "============================================"
+  echo "  Status VPN OpenVPN"
+  echo "============================================"
+  echo ""
+
+  if [[ -z "$active" ]]; then
+    echo "  Status: DISCONNECTED"
+    echo ""
+    echo "  Tidak ada koneksi OpenVPN aktif."
+    return 1
+  fi
+
+  echo "  Status: CONNECTED"
+  echo ""
+
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    local pid
+    local cfg
+    pid=$(echo "$line" | cut -d'|' -f1)
+    cfg=$(echo "$line" | cut -d'|' -f2)
+    local name
+    name=$(config_name "$cfg")
+    local uptime
+    uptime=$(ps -o etime= -p "$pid" 2>/dev/null | xargs || echo "N/A")
+
+    echo "  PID      : $pid"
+    echo "  Config   : $cfg"
+    echo "  Nama     : $name"
+    echo "  Uptime   : $uptime"
+  done <<< "$active"
+
+  echo ""
+
+  # Cek interface tun
+  if ip addr show tun0 &>/dev/null 2>&1; then
+    local tun_ip
+    tun_ip=$(ip addr show tun0 2>/dev/null | grep -w inet | awk '{print $2}' || echo "N/A")
+    echo "  Interface: tun0 ($tun_ip)"
+  elif ifconfig tun0 &>/dev/null 2>&1; then
+    local tun_ip
+    tun_ip=$(ifconfig tun0 2>/dev/null | grep -w inet | awk '{print $2}' || echo "N/A")
+    echo "  Interface: tun0 ($tun_ip)"
+  else
+    echo "  Interface: (tidak ditemukan)"
+  fi
+}
+
+# ============================================================
+# COMMAND: connect - Konek ke VPN
+# ============================================================
+cmd_connect() {
+  local target="$1"
+  local configs=()
+  while IFS= read -r line; do
+    configs+=("$line")
+  done < <(find_configs)
+
+  if [[ ${#configs[@]} -eq 0 ]]; then
+    echo "Error: Tidak ada file .ovpn ditemukan."
+    exit 1
+  fi
+
+  local selected=""
+
+  # Cari berdasarkan nomor
+  if [[ "$target" =~ ^[0-9]+$ ]]; then
+    local idx=$((target - 1))
+    if [[ $idx -ge 0 && $idx -lt ${#configs[@]} ]]; then
+      selected="${configs[$idx]}"
+    fi
+  fi
+
+  # Cari berdasarkan nama (partial match)
+  if [[ -z "$selected" ]]; then
+    for cfg in "${configs[@]}"; do
+      local name
+      name=$(config_name "$cfg")
+      if [[ "$name" == "$target" ]]; then
+        selected="$cfg"
+        break
+      fi
+    done
+  fi
+
+  # Cari berdasarkan partial match
+  if [[ -z "$selected" ]]; then
+    for cfg in "${configs[@]}"; do
+      local name
+      name=$(config_name "$cfg")
+      if echo "$name" | grep -qi "$target"; then
+        selected="$cfg"
+        break
+      fi
+    done
+  fi
+
+  if [[ -z "$selected" ]]; then
+    echo "Error: Config '$target' tidak ditemukan."
+    echo ""
+    cmd_list
+    exit 1
+  fi
+
+  local name
+  name=$(config_name "$selected")
+
+  echo "Menyambungkan ke: $name ..."
+  echo "Config file: $selected"
+  echo ""
+
+  # Disconnect existing connection first
+  local active
+  active=$(get_active_configs)
+  if [[ -n "$active" ]]; then
+    echo "Memutus koneksi yang sedang aktif..."
+    cmd_disconnect
+    sleep 2
+  fi
+
+  # Start OpenVPN
+  sudo "$OPENVPN_BIN" --daemon --config "$selected" --log /tmp/openvpn-$name.log --writepid /tmp/openvpn-$name.pid
+
+  sleep 3
+
+  # Verifikasi
+  local new_active
+  new_active=$(get_active_configs)
+  if [[ -n "$new_active" ]]; then
+    echo "✅ Berhasil terhubung ke: $name"
+    echo "   Log: /tmp/openvpn-$name.log"
+  else
+    echo "❌ Gagal terhubung ke: $name"
+    echo "   Cek log: /tmp/openvpn-$name.log"
+    exit 1
+  fi
+}
+
+# ============================================================
+# COMMAND: disconnect - Putuskan koneksi VPN
+# ============================================================
+cmd_disconnect() {
+  local pids
+  pids=$(get_active_pids)
+
+  if [[ -z "$pids" ]]; then
+    echo "Tidak ada koneksi OpenVPN aktif."
+    return 0
+  fi
+
+  local count=0
+  for pid in $pids; do
+    echo "Memutuskan PID $pid..."
+    sudo kill "$pid" 2>/dev/null || true
+    count=$((count + 1))
+  done
+
+  sleep 1
+
+  # Pastikan benar-benar mati
+  local remaining
+  remaining=$(get_active_pids)
+  if [[ -n "$remaining" ]]; then
+    echo "Beberapa proses masih berjalan, force kill..."
+    for pid in $remaining; do
+      sudo kill -9 "$pid" 2>/dev/null || true
+    done
+  fi
+
+  echo "✅ Semua koneksi OpenVPN diputuskan ($count proses)."
+}
+
+# ============================================================
+# COMMAND: log - Lihat log koneksi terakhir
+# ============================================================
+cmd_log() {
+  local target="${1:-}"
+  local logfile=""
+
+  if [[ -n "$target" ]]; then
+    logfile="/tmp/openvpn-$target.log"
+  else
+    # Cari log terbaru
+    logfile=$(ls -t /tmp/openvpn-*.log 2>/dev/null | head -1 || true)
+  fi
+
+  if [[ -z "$logfile" || ! -f "$logfile" ]]; then
+    echo "Tidak ada log ditemukan."
+    exit 1
+  fi
+
+  echo "Menampilkan log: $logfile"
+  echo "============================================"
+  tail -30 "$logfile"
+}
+
+# ============================================================
+# COMMAND: install - Install OpenVPN via Homebrew
+# ============================================================
+cmd_install() {
+  if detect_openvpn; then
+    echo "✅ OpenVPN sudah terinstall: $OPENVPN_BIN"
+    return 0
+  fi
+
+  echo "OpenVPN belum terinstall. Menginstall via Homebrew..."
+  echo ""
+
+  if ! command -v brew &>/dev/null; then
+    echo "Error: Homebrew tidak ditemukan."
+    echo "Install Homebrew dulu: https://brew.sh/"
+    exit 1
+  fi
+
+  brew install openvpn
+  echo ""
+  echo "✅ OpenVPN berhasil diinstall!"
+  echo ""
+  echo "Jalankan '$SCRIPT_NAME list' untuk melihat config yang tersedia."
+}
+
+# ============================================================
+# Fungsi: Inisialisasi & Setup
+# ============================================================
+init() {
+  # Buat config directory jika belum ada
+  mkdir -p "$HOME/.config/openvpn"
+
+  # Cek sudo access (tanpa password prompt di awal)
+  if ! sudo -n true 2>/dev/null; then
+    echo "⚠️  Perhatian: Script ini membutuhkan akses sudo."
+    echo "   Anda akan diminta password saat menjalankan command."
+    echo ""
+  fi
+}
+
+# ============================================================
+# MAIN
+# ============================================================
+main() {
+  local cmd="${1:-help}"
+  shift 2>/dev/null || true
+
+  case "$cmd" in
+    list|ls)
+      cmd_list
+      ;;
+    status|st)
+      cmd_status
+      ;;
+    connect|con|up)
+      if [[ $# -lt 1 ]]; then
+        echo "Gunakan: $SCRIPT_NAME connect <nama|nomor>"
+        echo ""
+        cmd_list
+        exit 1
+      fi
+      init
+      if ! detect_openvpn; then
+        echo "OpenVPN tidak ditemukan. Jalankan '$SCRIPT_NAME install' dulu."
+        exit 1
+      fi
+      cmd_connect "$1"
+      ;;
+    disconnect|discon|down)
+      init
+      cmd_disconnect
+      ;;
+    log)
+      cmd_log "${1:-}"
+      ;;
+    install)
+      cmd_install
+      ;;
+    help|--help|-h|"")
+      echo "Penggunaan: $SCRIPT_NAME <command> [options]"
+      echo ""
+      echo "Commands:"
+      echo "  list, ls              Tampilkan semua config .ovpn yang tersedia"
+      echo "  connect, up <nama>    Konek ke VPN (nama/nomor dari list)"
+      echo "  disconnect, down      Putuskan koneksi VPN"
+      echo "  status, st            Lihat status koneksi VPN"
+      echo "  log [nama]            Lihat log koneksi (opsional filter nama)"
+      echo "  install               Install OpenVPN via Homebrew (macOS)"
+      echo "  help                  Tampilkan pesan bantuan ini"
+      echo ""
+      echo "Contoh:"
+      echo "  $SCRIPT_NAME list"
+      echo "  $SCRIPT_NAME connect mamat-3"
+      echo "  $SCRIPT_NAME connect 1"
+      echo "  $SCRIPT_NAME disconnect"
+      echo "  $SCRIPT_NAME status"
+      echo "  $SCRIPT_NAME log"
+      echo ""
+      echo "Config otomatis dicari dari:"
+      printf "  - %s\n" "${CONFIG_DIRS[@]}"
+      ;;
+    *)
+      echo "Error: Command '$cmd' tidak dikenal."
+      echo "Gunakan '$SCRIPT_NAME help' untuk bantuan."
+      exit 1
+      ;;
+  esac
+}
+
+main "$@"
